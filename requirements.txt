@@ -1,0 +1,30 @@
+# Polymarket Micro-Spread Trading Bot
+# Core dependencies
+
+# Polymarket CLOB client
+py-clob-client>=0.18.0
+
+# WebSocket for real-time data
+websocket-client>=1.6.0
+
+# Data handling
+pandas>=2.0.0
+numpy>=1.24.0
+
+# Environment & config
+python-dotenv>=1.0.0
+
+# HTTP requests
+requests>=2.31.0
+
+# Colored terminal output
+termcolor>=2.3.0
+
+# Async support
+aiohttp>=3.9.0
+
+# Logging
+loguru>=0.7.0
+
+
+
