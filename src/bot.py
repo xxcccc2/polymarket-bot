@@ -21,6 +21,7 @@ from .config import (
     SCAN_INTERVAL_SECONDS,
     PAPER_TRADING,
     CRYPTO_MARKET_KEYWORDS,
+    ONLY_CRYPTO_MARKETS,
     MIN_VOLUME_USD,
     print_config,
     validate_config,
@@ -86,7 +87,7 @@ class PolymarketBot:
         
         if self.multi_strategy_mode:
             cprint("📈 Loading ALL strategies (multi-strategy mode)", "cyan", attrs=["bold"])
-            for name in ["spread", "arbitrage", "stink_bid", "favorite_longshot"]:
+            for name in ["spread", "arbitrage", "stink_bid", "favorite_longshot", "late_money"]:
                 strat = get_strategy(name, **(strategy_config or {}))
                 self.strategies.append(strat)
                 cprint(f"   ✅ {name}: {strat.description}", "white")
@@ -205,6 +206,8 @@ class PolymarketBot:
     def _main_loop(self):
         """Main trading loop."""
         last_scan = 0
+        last_fill_check = 0
+        fill_check_interval = 10  # Check for fills every 10 seconds
         
         while self.is_running:
             try:
@@ -214,6 +217,11 @@ class PolymarketBot:
                 if now - last_scan >= SCAN_INTERVAL_SECONDS:
                     self._scan_and_trade()
                     last_scan = now
+                
+                # Check for fills periodically
+                if now - last_fill_check >= fill_check_interval:
+                    self._check_for_fills()
+                    last_fill_check = now
                 
                 # Small sleep to prevent CPU spinning
                 time.sleep(0.1)
@@ -308,9 +316,32 @@ class PolymarketBot:
                     market.get("volume", 0) or 0
                 )
                 
+                # Get the actual token ID for YES outcome
+                # The CLOB API needs the token_id, not the conditionId!
+                # clobTokenIds format: ["YES_TOKEN_ID", "NO_TOKEN_ID"]
+                clob_tokens = market.get("clobTokenIds", [])
+                
+                if not clob_tokens or len(clob_tokens) < 1:
+                    continue
+                
+                # Parse clobTokenIds - it might be a string or list
+                if isinstance(clob_tokens, str):
+                    import json
+                    try:
+                        clob_tokens = json.loads(clob_tokens)
+                    except:
+                        continue
+                
+                # First token is YES, second is NO
+                yes_token_id = clob_tokens[0] if len(clob_tokens) > 0 else None
+                no_token_id = clob_tokens[1] if len(clob_tokens) > 1 else None
+                
+                if not yes_token_id:
+                    continue
+                
                 # Create market data for YES outcome
                 data = MarketData(
-                    token_id=condition_id,  # Use conditionId as identifier
+                    token_id=yes_token_id,  # Use actual token ID for CLOB API
                     condition_id=condition_id,
                     market_slug=market.get("slug", ""),
                     question=market.get("question", ""),
@@ -342,15 +373,16 @@ class PolymarketBot:
             
             markets = result if isinstance(result, list) else result.get("data", [])
             
-            # Filter for crypto price prediction markets
+            # Filter markets based on settings
             filtered = []
             for market in markets:
                 question = market.get("question", "").lower()
                 
-                # Check if crypto-related
-                is_crypto = any(kw in question for kw in CRYPTO_MARKET_KEYWORDS)
-                if not is_crypto:
-                    continue
+                # Check if crypto-related (if filter enabled)
+                if ONLY_CRYPTO_MARKETS:
+                    is_crypto = any(kw in question for kw in CRYPTO_MARKET_KEYWORDS)
+                    if not is_crypto:
+                        continue
                 
                 # Check volume
                 volume = float(market.get("volume24hr", 0))
@@ -369,7 +401,8 @@ class PolymarketBot:
                 if condition_id:
                     self.markets[condition_id] = market
             
-            cprint(f"✅ Found {len(self.markets)} tradeable crypto markets", "green")
+            market_type = "crypto" if ONLY_CRYPTO_MARKETS else "all"
+            cprint(f"✅ Found {len(self.markets)} tradeable markets ({market_type})", "green")
             
             # Subscribe to WebSocket for these markets
             token_ids = []
@@ -396,6 +429,67 @@ class PolymarketBot:
     def _on_feed_disconnect(self, reason: str):
         """Handle WebSocket disconnection."""
         cprint(f"📡 WebSocket disconnected: {reason}", "yellow")
+    
+    def _check_for_fills(self):
+        """Poll Polymarket for recent trades and detect fills."""
+        try:
+            # Get recent trades from Polymarket
+            trades = self.client.get_trades(limit=50)
+            
+            if not trades:
+                return
+            
+            # Track which trades we've already processed (by trade ID)
+            if not hasattr(self, '_processed_trades'):
+                self._processed_trades = set()
+            
+            for trade in trades:
+                trade_id = trade.get("id") or trade.get("trade_id")
+                if not trade_id or trade_id in self._processed_trades:
+                    continue
+                
+                # Mark as processed
+                self._processed_trades.add(trade_id)
+                
+                # Keep set size manageable
+                if len(self._processed_trades) > 500:
+                    self._processed_trades = set(list(self._processed_trades)[-200:])
+                
+                # Find matching order in our order manager
+                token_id = trade.get("asset_id") or trade.get("token_id")
+                side = trade.get("side", "").upper()
+                price = float(trade.get("price", 0))
+                size = float(trade.get("size", 0))
+                
+                # Log the fill with strategy info
+                order = None
+                strategy_name = "unknown"
+                
+                for oid, o in self.order_manager.orders.items():
+                    if o.token_id == token_id and o.side == side:
+                        order = o
+                        strategy_name = o.metadata.get("strategy", "unknown")
+                        break
+                
+                if order:
+                    cprint(f"💰 FILL [{strategy_name.upper()}]: {side} {size:.2f} @ ${price:.3f} | {order.market_slug}", "green", attrs=["bold"])
+                    
+                    # Trigger fill handler
+                    fill_data = {
+                        "trade_id": trade_id,
+                        "side": side,
+                        "price": price,
+                        "size": size,
+                        "token_id": token_id
+                    }
+                    self._on_order_fill(order, fill_data)
+                else:
+                    # Still log untracked fills
+                    cprint(f"💰 FILL [EXTERNAL]: {side} {size:.2f} @ ${price:.3f}", "cyan")
+                    
+        except Exception as e:
+            # Don't spam errors - fill checking is optional
+            pass
     
     def _on_order_fill(self, order, fill_data: Dict):
         """Handle order fills."""

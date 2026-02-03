@@ -33,6 +33,7 @@ from .spread_strategy import SpreadStrategy
 from .arbitrage_strategy import ArbitrageStrategy
 from .stink_bid_strategy import StinkBidStrategy
 from .favorite_longshot_strategy import FavoriteLongshotStrategy
+from .late_money_strategy import LateMoneyStrategy
 
 # Registry of available strategies
 AVAILABLE_STRATEGIES = {
@@ -40,9 +41,10 @@ AVAILABLE_STRATEGIES = {
     "arbitrage": ArbitrageStrategy,
     "stink_bid": StinkBidStrategy,
     "favorite_longshot": FavoriteLongshotStrategy,
+    "late_money": LateMoneyStrategy,
     # Add new strategies here:
     # "anchoring": AnchoringStrategy,
-    # "late_money": LateMoneyStrategy,
+    # "overreaction": OverreactionStrategy,
 }
 
 

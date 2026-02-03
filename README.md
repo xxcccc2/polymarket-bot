@@ -98,20 +98,20 @@ Exploits the most documented prediction market inefficiency (55%+ edge):
 - Filter by time-to-expiration (prefer 3+ months out)
 - Based on Snowberg & Wolfers research on probability misperception
 
-### Roadmap - Easy to Add 🟢
-
-#### 5. Anchoring Bias Strategy
-Exploit price stickiness around psychological levels:
-- Detect prices clustering at 25/50/75¢ round numbers
-- Trade away from anchors when fundamentals diverge
-- Based on Tversky & Kahneman (1974) research
-
-#### 6. Late Money Strategy
+#### 5. Late Money Strategy ✅
 Follow informed traders near expiration:
 - Monitor price velocity in final hours before resolution
 - 40% of volume occurs in last minute (more informed)
 - Follow sharp late moves rather than fade them
 - 3-8% improved predictive accuracy over early prices
+
+### Roadmap - Easy to Add 🟢
+
+#### 6. Anchoring Bias Strategy
+Exploit price stickiness around psychological levels:
+- Detect prices clustering at 25/50/75¢ round numbers
+- Trade away from anchors when fundamentals diverge
+- Based on Tversky & Kahneman (1974) research
 
 #### 7. Overreaction Strategy
 Mean-reversion after extreme moves:
@@ -127,6 +127,7 @@ Cross-market logical inconsistencies ($40M extracted from Polymarket!):
 - Parse market questions for logical dependencies
 - "BTC >$100k" implies "BTC >$90k" must also be true
 - Find pricing violations across related markets
+
 - Requires NLP/embedding similarity detection
 
 #### 9. Cross-Asset Signals Strategy
@@ -229,18 +230,27 @@ python -m src.bot --strategy all
 polymarket-bot/
 ├── src/
 │   ├── __init__.py
-│   ├── config.py           # Configuration management
-│   ├── client.py           # Polymarket CLOB client wrapper
-│   ├── websocket_feed.py   # Real-time market data
-│   ├── order_manager.py    # Order lifecycle management
-│   ├── risk_manager.py     # Risk controls & circuit breakers
-│   ├── bot.py              # Main orchestrator
+│   ├── config.py               # Configuration management
+│   ├── client.py               # Polymarket CLOB client wrapper
+│   ├── websocket_feed.py       # Real-time market data
+│   ├── order_manager.py        # Order lifecycle management
+│   ├── risk_manager.py         # Risk controls & circuit breakers
+│   ├── bot.py                  # Main orchestrator
 │   └── strategies/
-│       ├── __init__.py     # Strategy registry
-│       ├── base_strategy.py    # Abstract base class
-│       └── spread_strategy.py  # Spread farming implementation
+│       ├── __init__.py              # Strategy registry
+│       ├── base_strategy.py         # Abstract base class
+│       ├── spread_strategy.py       # Spread farming
+│       ├── arbitrage_strategy.py    # YES+NO < $1 arbitrage
+│       ├── stink_bid_strategy.py    # 1¢ limit bids
+│       ├── favorite_longshot_strategy.py  # Bias exploitation
+│       └── late_money_strategy.py   # Price velocity signals
 ├── data/                   # Runtime data (ignored by git)
 ├── logs/                   # Log files (ignored by git)
+├── docs/                   # Documentation
+│   ├── CODE_REVIEW.md      # Technical code review
+│   ├── STRATEGY_ROADMAP.md # Strategy implementation status
+│   ├── to-do.md            # Development tasks
+│   └── knowledge/          # Research & references
 ├── env.example             # Environment template (copy to .env)
 ├── requirements.txt        # Python dependencies
 └── README.md

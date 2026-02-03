@@ -71,6 +71,9 @@ MAX_PRICE_CENTS = float(os.getenv("MAX_PRICE_CENTS", "95"))
 # Minimum 24h volume to consider market
 MIN_VOLUME_USD = float(os.getenv("MIN_VOLUME_USD", "10000"))
 
+# Only trade crypto markets (set to false for political/sports/all markets)
+ONLY_CRYPTO_MARKETS = os.getenv("ONLY_CRYPTO_MARKETS", "false").lower() == "true"
+
 # Keywords to identify crypto price prediction markets
 CRYPTO_MARKET_KEYWORDS = [
     "bitcoin", "btc", "ethereum", "eth", "solana", "sol",
@@ -165,6 +168,7 @@ def print_config():
     cprint("\n🔧 Bot Settings:", "cyan")
     cprint(f"  Paper Trading: {'✅ ON' if PAPER_TRADING else '❌ OFF (LIVE!)'}", "green" if PAPER_TRADING else "red")
     cprint(f"  Scan Interval: {SCAN_INTERVAL_SECONDS}s", "white")
+    cprint(f"  Markets: {'Crypto only' if ONLY_CRYPTO_MARKETS else '🌍 ALL markets (political, sports, crypto)'}", "cyan" if not ONLY_CRYPTO_MARKETS else "white")
     cprint(f"  Log Level: {LOG_LEVEL}", "white")
     
     cprint("="*60 + "\n", "cyan")

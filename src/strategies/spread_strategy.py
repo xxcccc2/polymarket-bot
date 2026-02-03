@@ -30,6 +30,7 @@ from ..config import (
     TRADING_FEE_RATE,
     MIN_PROFIT_MARGIN,
     CRYPTO_MARKET_KEYWORDS,
+    ONLY_CRYPTO_MARKETS,
 )
 
 
@@ -59,7 +60,7 @@ class SpreadStrategy(BaseStrategy):
         self.order_size_usd = self.config.get("order_size_usd", ORDER_SIZE_USD)
         self.max_position_usd = self.config.get("max_position_usd", MAX_POSITION_USD)
         self.price_improvement = self.config.get("price_improvement", 0)  # cents
-        self.only_crypto = self.config.get("only_crypto", True)
+        self.only_crypto = self.config.get("only_crypto", ONLY_CRYPTO_MARKETS)
         
         # Track active positions and orders per market
         self.positions: Dict[str, float] = {}  # token_id -> position size
@@ -142,10 +143,21 @@ class SpreadStrategy(BaseStrategy):
                     cprint(f"      ⚠️ {data.question[:35]}... filtered: cooldown active", "yellow")
                 continue
             
-            # Check position limits
+            # Check position limits (filled positions)
             current_position = self.positions.get(data.token_id, 0)
             if current_position >= self.max_position_usd:
                 cprint(f"      ⚠️ {data.question[:35]}... filtered: position limit ${current_position:.0f} >= ${self.max_position_usd:.0f}", "yellow")
+                continue
+            
+            # Check for pending orders on this market (prevent duplicate orders!)
+            pending_value = sum(
+                o["size"] * o["entry_price"] 
+                for o in self.pending_orders.values() 
+                if o.get("token_id") == data.token_id
+            )
+            total_exposure = current_position + pending_value
+            if total_exposure >= self.max_position_usd:
+                cprint(f"      ⚠️ {data.question[:35]}... filtered: pending orders ${pending_value:.0f} + position ${current_position:.0f} >= ${self.max_position_usd:.0f}", "yellow")
                 continue
             
             # Calculate entry and exit prices

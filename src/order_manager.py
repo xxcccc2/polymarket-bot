@@ -155,6 +155,15 @@ class OrderManager:
                 "error": f"Invalid size {size} - must be positive"
             }
         
+        # PREVENT DUPLICATE ORDERS: Check if we already have an active order for this token
+        existing_orders = self.get_orders_for_token(token_id)
+        active_for_token = [o for o in existing_orders if o.is_active and o.side == side.upper()]
+        if active_for_token:
+            return {
+                "success": False,
+                "error": f"Already have {len(active_for_token)} active {side} order(s) for this token"
+            }
+        
         # Place order via client
         result = self.client.place_order(
             token_id=token_id,
