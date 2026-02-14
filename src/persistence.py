@@ -1,0 +1,215 @@
+"""
+SQLite persistence layer for bot state.
+
+Stores orders, positions, and trades to survive restarts.
+"""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+from .config import BOT_STATE_DB
+
+DEFAULT_DB_PATH = BOT_STATE_DB
+
+
+class SqliteStore:
+    """Lightweight SQLite-backed storage for bot state."""
+
+    def __init__(self, db_path: Optional[Path] = None):
+        self.db_path = Path(db_path) if db_path else DEFAULT_DB_PATH
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._init_db()
+
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _init_db(self) -> None:
+        with self._connect() as conn:
+            conn.execute("PRAGMA journal_mode=WAL;")
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS orders (
+                    order_id TEXT PRIMARY KEY,
+                    token_id TEXT NOT NULL,
+                    market_slug TEXT,
+                    side TEXT NOT NULL,
+                    price REAL NOT NULL,
+                    size REAL NOT NULL,
+                    filled_size REAL NOT NULL,
+                    status TEXT NOT NULL,
+                    order_type TEXT,
+                    created_at TEXT,
+                    updated_at TEXT,
+                    metadata_json TEXT
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS positions (
+                    token_id TEXT PRIMARY KEY,
+                    market_slug TEXT,
+                    side TEXT,
+                    size REAL,
+                    avg_price REAL,
+                    current_price REAL,
+                    unrealized_pnl REAL,
+                    realized_pnl REAL,
+                    opened_at TEXT,
+                    updated_at TEXT
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS trades (
+                    trade_id TEXT PRIMARY KEY,
+                    order_id TEXT,
+                    token_id TEXT,
+                    market_slug TEXT,
+                    side TEXT,
+                    price REAL,
+                    size REAL,
+                    strategy TEXT,
+                    traded_at TEXT
+                )
+                """
+            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_orders_token ON orders(token_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_token ON trades(token_id)")
+
+    def save_order(self, record: Dict[str, Any]) -> None:
+        metadata = record.get("metadata") or {}
+        payload = {
+            "order_id": record["order_id"],
+            "token_id": record["token_id"],
+            "market_slug": record.get("market_slug"),
+            "side": record["side"],
+            "price": record["price"],
+            "size": record["size"],
+            "filled_size": record.get("filled_size", 0),
+            "status": record["status"],
+            "order_type": record.get("order_type"),
+            "created_at": record.get("created_at"),
+            "updated_at": record.get("updated_at"),
+            "metadata_json": json.dumps(metadata),
+        }
+
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO orders (
+                    order_id, token_id, market_slug, side, price, size, filled_size,
+                    status, order_type, created_at, updated_at, metadata_json
+                ) VALUES (
+                    :order_id, :token_id, :market_slug, :side, :price, :size, :filled_size,
+                    :status, :order_type, :created_at, :updated_at, :metadata_json
+                )
+                ON CONFLICT(order_id) DO UPDATE SET
+                    token_id=excluded.token_id,
+                    market_slug=excluded.market_slug,
+                    side=excluded.side,
+                    price=excluded.price,
+                    size=excluded.size,
+                    filled_size=excluded.filled_size,
+                    status=excluded.status,
+                    order_type=excluded.order_type,
+                    created_at=excluded.created_at,
+                    updated_at=excluded.updated_at,
+                    metadata_json=excluded.metadata_json
+                """,
+                payload,
+            )
+
+    def load_orders(self) -> List[Dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute("SELECT * FROM orders").fetchall()
+
+        records = []
+        for row in rows:
+            record = dict(row)
+            record["metadata"] = json.loads(record.get("metadata_json") or "{}")
+            record.pop("metadata_json", None)
+            records.append(record)
+        return records
+
+    def save_position(self, record: Dict[str, Any]) -> None:
+        payload = {
+            "token_id": record["token_id"],
+            "market_slug": record.get("market_slug"),
+            "side": record.get("side"),
+            "size": record.get("size"),
+            "avg_price": record.get("avg_price"),
+            "current_price": record.get("current_price"),
+            "unrealized_pnl": record.get("unrealized_pnl"),
+            "realized_pnl": record.get("realized_pnl"),
+            "opened_at": record.get("opened_at"),
+            "updated_at": record.get("updated_at"),
+        }
+
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO positions (
+                    token_id, market_slug, side, size, avg_price, current_price,
+                    unrealized_pnl, realized_pnl, opened_at, updated_at
+                ) VALUES (
+                    :token_id, :market_slug, :side, :size, :avg_price, :current_price,
+                    :unrealized_pnl, :realized_pnl, :opened_at, :updated_at
+                )
+                ON CONFLICT(token_id) DO UPDATE SET
+                    market_slug=excluded.market_slug,
+                    side=excluded.side,
+                    size=excluded.size,
+                    avg_price=excluded.avg_price,
+                    current_price=excluded.current_price,
+                    unrealized_pnl=excluded.unrealized_pnl,
+                    realized_pnl=excluded.realized_pnl,
+                    opened_at=excluded.opened_at,
+                    updated_at=excluded.updated_at
+                """,
+                payload,
+            )
+
+    def load_positions(self) -> List[Dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute("SELECT * FROM positions").fetchall()
+
+        return [dict(row) for row in rows]
+
+    def delete_position(self, token_id: str) -> None:
+        with self._connect() as conn:
+            conn.execute("DELETE FROM positions WHERE token_id = ?", (token_id,))
+
+    def save_trade(self, record: Dict[str, Any]) -> None:
+        payload = {
+            "trade_id": record["trade_id"],
+            "order_id": record.get("order_id"),
+            "token_id": record.get("token_id"),
+            "market_slug": record.get("market_slug"),
+            "side": record.get("side"),
+            "price": record.get("price"),
+            "size": record.get("size"),
+            "strategy": record.get("strategy"),
+            "traded_at": record.get("traded_at"),
+        }
+
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO trades (
+                    trade_id, order_id, token_id, market_slug, side,
+                    price, size, strategy, traded_at
+                ) VALUES (
+                    :trade_id, :order_id, :token_id, :market_slug, :side,
+                    :price, :size, :strategy, :traded_at
+                )
+                """,
+                payload,
+            )

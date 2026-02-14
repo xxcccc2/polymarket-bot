@@ -6,9 +6,10 @@ rate limiting, and convenience methods.
 """
 
 import time
+import random
 from typing import Dict, List, Optional, Any
 from datetime import datetime
-from termcolor import cprint
+from .logging_utils import cprint
 
 from .config import (
     CLOB_HOST,
@@ -18,7 +19,11 @@ from .config import (
     PROXY_ADDRESS,
     SIGNATURE_TYPE,
     PAPER_TRADING,
+    PAPER_BALANCE_USD,
     ORDER_RATE_LIMIT_SUSTAINED,
+    RETRY_MAX_ATTEMPTS,
+    RETRY_BASE_DELAY_SECONDS,
+    RETRY_MAX_DELAY_SECONDS,
 )
 
 # Will be imported when py-clob-client is installed
@@ -104,6 +109,28 @@ class PolymarketClient:
             time.sleep(sleep_time)
         
         self.last_order_time = time.time()
+
+    def _retry_call(self, func, action: str):
+        """Retry wrapper with exponential backoff."""
+        attempt = 0
+        last_error: Optional[Exception] = None
+        while attempt < RETRY_MAX_ATTEMPTS:
+            try:
+                return func()
+            except Exception as exc:
+                last_error = exc
+                attempt += 1
+                if attempt >= RETRY_MAX_ATTEMPTS:
+                    break
+                delay = min(
+                    RETRY_MAX_DELAY_SECONDS,
+                    RETRY_BASE_DELAY_SECONDS * (2 ** (attempt - 1)),
+                )
+                jitter = delay * 0.1 * random.random()
+                cprint(f"⚠️  {action} failed (attempt {attempt}/{RETRY_MAX_ATTEMPTS}): {exc}", "yellow")
+                time.sleep(delay + jitter)
+        if last_error:
+            raise last_error
     
     def get_markets(self, next_cursor: str = "") -> Dict:
         """
@@ -125,11 +152,13 @@ class PolymarketClient:
             params = {"closed": "false", "limit": 100}
             if next_cursor:
                 params["next_cursor"] = next_cursor
-            
-            response = requests.get(url, params=params, timeout=30)
-            response.raise_for_status()
-            
-            return response.json()
+
+            def _request():
+                response = requests.get(url, params=params, timeout=30)
+                response.raise_for_status()
+                return response.json()
+
+            return self._retry_call(_request, "Fetch markets")
             
         except Exception as e:
             cprint(f"❌ Failed to fetch markets: {e}", "red")
@@ -152,10 +181,13 @@ class PolymarketClient:
             import requests
             
             url = f"{GAMMA_HOST}/markets/{condition_id}"
-            response = requests.get(url, timeout=30)
-            response.raise_for_status()
-            
-            return response.json()
+
+            def _request():
+                response = requests.get(url, timeout=30)
+                response.raise_for_status()
+                return response.json()
+
+            return self._retry_call(_request, f"Fetch market {condition_id}")
             
         except Exception as e:
             cprint(f"❌ Failed to fetch market {condition_id}: {e}", "red")
@@ -175,8 +207,10 @@ class PolymarketClient:
             return None
         
         try:
-            book = self.client.get_order_book(token_id)
-            return book
+            return self._retry_call(
+                lambda: self.client.get_order_book(token_id),
+                f"Fetch orderbook {token_id}",
+            )
             
         except Exception as e:
             cprint(f"❌ Failed to fetch orderbook: {e}", "red")
@@ -197,7 +231,7 @@ class PolymarketClient:
         
         try:
             # Try the price endpoint first
-            price = self.client.get_price(token_id)
+            price = self._retry_call(lambda: self.client.get_price(token_id), f"Fetch price {token_id}")
             if price and (price.get("bid") or price.get("ask")):
                 return price
         except:
@@ -205,7 +239,10 @@ class PolymarketClient:
         
         # Fallback: get from orderbook
         try:
-            book = self.client.get_order_book(token_id)
+            book = self._retry_call(
+                lambda: self.client.get_order_book(token_id),
+                f"Fetch orderbook {token_id}",
+            )
             if book:
                 bids = book.get("bids", [])
                 asks = book.get("asks", [])
@@ -272,11 +309,17 @@ class PolymarketClient:
             )
             
             # Create and sign order
-            signed_order = self.client.create_order(order_args)
-            
+            signed_order = self._retry_call(
+                lambda: self.client.create_order(order_args),
+                "Create order",
+            )
+
             # Post order
             ot = OrderType.GTC if order_type == "GTC" else OrderType.FOK
-            result = self.client.post_order(signed_order, ot)
+            result = self._retry_call(
+                lambda: self.client.post_order(signed_order, ot),
+                "Post order",
+            )
             
             cprint(f"✅ Order placed: {side} {size:.2f} @ ${price:.3f}", "green")
             
@@ -314,7 +357,7 @@ class PolymarketClient:
         
         try:
             self._rate_limit()
-            result = self.client.cancel(order_id)
+            result = self._retry_call(lambda: self.client.cancel(order_id), f"Cancel order {order_id}")
             
             cprint(f"🚫 Order cancelled: {order_id}", "yellow")
             return {"success": True, "result": result}
@@ -332,7 +375,7 @@ class PolymarketClient:
             return {"success": True, "paper_trade": True}
         
         try:
-            result = self.client.cancel_all()
+            result = self._retry_call(lambda: self.client.cancel_all(), "Cancel all orders")
             cprint("🚫 All orders cancelled", "yellow")
             return {"success": True, "result": result}
             
@@ -345,7 +388,7 @@ class PolymarketClient:
             return []
         
         try:
-            orders = self.client.get_orders()
+            orders = self._retry_call(lambda: self.client.get_orders(), "Fetch open orders")
             return orders if orders else []
             
         except Exception as e:
@@ -358,7 +401,7 @@ class PolymarketClient:
             return []
         
         try:
-            trades = self.client.get_trades()
+            trades = self._retry_call(lambda: self.client.get_trades(), "Fetch trades")
             return trades[:limit] if trades else []
             
         except Exception as e:
@@ -371,8 +414,61 @@ class PolymarketClient:
         
         Note: This may require additional setup depending on API version.
         """
-        # Balance fetching depends on proxy wallet setup
-        # For now, return None and let user check manually
+        if PAPER_TRADING:
+            return float(PAPER_BALANCE_USD)
+
+        if not self.is_connected or not self.client:
+            return None
+
+        def parse_balance(payload) -> Optional[float]:
+            if payload is None:
+                return None
+            if isinstance(payload, (int, float)):
+                return float(payload)
+            if isinstance(payload, dict):
+                for key in (
+                    "balance",
+                    "availableBalance",
+                    "available_balance",
+                    "totalBalance",
+                    "total_balance",
+                    "cashBalance",
+                    "collateral",
+                    "usdc",
+                    "USDC",
+                ):
+                    if key in payload:
+                        try:
+                            return float(payload[key])
+                        except (TypeError, ValueError):
+                            return None
+                if "data" in payload:
+                    return parse_balance(payload.get("data"))
+                return None
+            if isinstance(payload, list):
+                for item in payload:
+                    if not isinstance(item, dict):
+                        continue
+                    asset = str(item.get("asset") or item.get("token") or item.get("symbol") or "").upper()
+                    if asset in {"USDC", "USD"}:
+                        return parse_balance(item)
+                    value = parse_balance(item)
+                    if value is not None:
+                        return value
+            return None
+
+        for method_name in ("get_balance", "get_collateral", "get_account"):
+            method = getattr(self.client, method_name, None)
+            if not method:
+                continue
+            try:
+                response = method()
+            except Exception:
+                continue
+            balance = parse_balance(response)
+            if balance is not None:
+                return balance
+
         return None
 
 

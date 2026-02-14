@@ -19,6 +19,31 @@ WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 CHAIN_ID = 137  # Polygon mainnet
 
 # =============================================================================
+# KALSHI API SETTINGS
+# =============================================================================
+KALSHI_BASE_URL = os.getenv("KALSHI_BASE_URL", "https://api.elections.kalshi.com")
+KALSHI_TRADE_API_PATH = os.getenv("KALSHI_TRADE_API_PATH", "/trade-api/v2")
+KALSHI_ACCESS_KEY = os.getenv("KALSHI_ACCESS_KEY", "")
+KALSHI_PRIVATE_KEY_PATH = os.getenv("KALSHI_PRIVATE_KEY_PATH", "")
+KALSHI_RATE_LIMIT_PER_SECOND = int(os.getenv("KALSHI_RATE_LIMIT_PER_SECOND", "5"))
+KALSHI_ORDERBOOK_TTL_SECONDS = int(os.getenv("KALSHI_ORDERBOOK_TTL_SECONDS", "2"))
+KALSHI_TRADING_ENABLED = os.getenv("KALSHI_TRADING_ENABLED", "false").lower() == "true"
+KALSHI_MARKET_MAP_PATH = os.getenv(
+    "KALSHI_MARKET_MAP_PATH",
+    str(PROJECT_ROOT / "data" / "kalshi_market_map.json"),
+)
+KALSHI_MIN_PROFIT_CENTS = float(os.getenv("KALSHI_MIN_PROFIT_CENTS", "2"))
+
+# =============================================================================
+# BINANCE API SETTINGS
+# =============================================================================
+BINANCE_API_KEY = os.getenv("BINANCE_API_KEY", "")
+BINANCE_SECRET_KEY = os.getenv("BINANCE_SECRET_KEY", "")
+BINANCE_WS_URL = os.getenv("BINANCE_WS_URL", "wss://stream.binance.com:9443/ws")
+BINANCE_REST_URL = os.getenv("BINANCE_REST_URL", "https://api.binance.com")
+BINANCE_SYMBOL = os.getenv("BINANCE_SYMBOL", "btcusdt")
+
+# =============================================================================
 # CREDENTIALS (from .env)
 # =============================================================================
 PRIVATE_KEY = os.getenv("POLYMARKET_PRIVATE_KEY", "")
@@ -81,16 +106,133 @@ CRYPTO_MARKET_KEYWORDS = [
 ]
 
 # =============================================================================
+# 5-MINUTE BTC MARKET SETTINGS
+# =============================================================================
+# Enable 5-min BTC market strategies
+ENABLE_BTC_5MIN = os.getenv("ENABLE_BTC_5MIN", "true").lower() == "true"
+
+# Keywords to identify 5-min BTC markets on Polymarket
+BTC_5MIN_KEYWORDS = [
+    "5-minute", "5 minute", "5min", "5-min",
+    "next 5", "in 5 minutes",
+]
+
+# Cross-asset latency thresholds
+# Minimum BTC price move (%) on Binance to trigger a signal
+BTC_MIN_MOVE_PCT = float(os.getenv("BTC_MIN_MOVE_PCT", "0.15"))
+# Reaction window — seconds after Binance move to trade Polymarket
+BTC_REACTION_WINDOW_SECONDS = float(os.getenv("BTC_REACTION_WINDOW_SECONDS", "10"))
+# Minimum confidence to trade cross-asset signal
+BTC_MIN_CONFIDENCE = float(os.getenv("BTC_MIN_CONFIDENCE", "0.55"))
+
+# Terminal convergence — seconds before expiry to start trading
+TERMINAL_CONVERGENCE_WINDOW_SECONDS = int(os.getenv("TERMINAL_CONVERGENCE_WINDOW_SECONDS", "60"))
+# Minimum mispricing (cents) to trigger terminal convergence
+TERMINAL_MIN_EDGE_CENTS = float(os.getenv("TERMINAL_MIN_EDGE_CENTS", "3"))
+
+# Orderbook imbalance — minimum bid/ask volume ratio to signal
+ORDERBOOK_IMBALANCE_RATIO = float(os.getenv("ORDERBOOK_IMBALANCE_RATIO", "2.5"))
+
+# =============================================================================
+# KELLY CRITERION SETTINGS
+# =============================================================================
+# Kelly fraction mode: "full", "half", "quarter"
+KELLY_FRACTION_MODE = os.getenv("KELLY_FRACTION_MODE", "half")
+# Maximum Kelly bet as fraction of bankroll (safety cap)
+KELLY_MAX_BET_FRACTION = float(os.getenv("KELLY_MAX_BET_FRACTION", "0.05"))
+# Minimum edge required before Kelly sizes a bet (below this → skip)
+KELLY_MIN_EDGE = float(os.getenv("KELLY_MIN_EDGE", "0.01"))
+
+# =============================================================================
+# VOLATILITY / MARKET MAKING REGIME
+# =============================================================================
+# Rolling window for volatility calculation (seconds)
+VOL_WINDOW_SECONDS = int(os.getenv("VOL_WINDOW_SECONDS", "300"))
+# High-vol threshold (annualized σ above this = widen spreads)
+VOL_HIGH_THRESHOLD = float(os.getenv("VOL_HIGH_THRESHOLD", "0.80"))
+# Low-vol threshold (below this = tighten spreads)
+VOL_LOW_THRESHOLD = float(os.getenv("VOL_LOW_THRESHOLD", "0.30"))
+# Spread multiplier in high-vol regime
+VOL_HIGH_SPREAD_MULT = float(os.getenv("VOL_HIGH_SPREAD_MULT", "1.5"))
+# Spread multiplier in low-vol regime
+VOL_LOW_SPREAD_MULT = float(os.getenv("VOL_LOW_SPREAD_MULT", "0.7"))
+
+# =============================================================================
+# TELEGRAM ALERTS
+# =============================================================================
+# Create a bot via @BotFather, then get chat_id from /getUpdates
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+TELEGRAM_ALERTS_ENABLED = os.getenv("TELEGRAM_ALERTS_ENABLED", "true").lower() == "true"
+
+# =============================================================================
+# STRATEGY SELECTION
+# =============================================================================
+# Comma-separated list of strategies to DISABLE (won't load even in "all" mode)
+# Default: disable money-losing / capital-inefficient strategies for small bankrolls
+DISABLED_STRATEGIES = [
+    s.strip()
+    for s in os.getenv("DISABLED_STRATEGIES", "spread,arbitrage,favorite_longshot,cross_platform_arbitrage").split(",")
+    if s.strip()
+]
+
+# Enable adaptive (bankroll-proportional) risk management
+ADAPTIVE_RISK_ENABLED = os.getenv("ADAPTIVE_RISK_ENABLED", "true").lower() == "true"
+
+# =============================================================================
+# VPIN (Volume-Synchronized Probability of Informed Trading)
+# =============================================================================
+VPIN_THRESHOLD = float(os.getenv("VPIN_THRESHOLD", "0.60"))
+VPIN_BUCKET_SECONDS = int(os.getenv("VPIN_BUCKET_SECONDS", "15"))
+VPIN_BUCKET_COUNT = int(os.getenv("VPIN_BUCKET_COUNT", "20"))
+VPIN_MIN_VOLUME_USD = float(os.getenv("VPIN_MIN_VOLUME_USD", "50"))
+VPIN_COOLDOWN_SECONDS = int(os.getenv("VPIN_COOLDOWN_SECONDS", "120"))
+
+# =============================================================================
+# SENTIMENT (CryptoPanic news feed)
+# =============================================================================
+# Optional: CryptoPanic API key for premium feed (free tier works without it)
+CRYPTOPANIC_API_KEY = os.getenv("CRYPTOPANIC_API_KEY", "")
+SENTIMENT_THRESHOLD = float(os.getenv("SENTIMENT_THRESHOLD", "0.40"))
+SENTIMENT_POLL_INTERVAL = int(os.getenv("SENTIMENT_POLL_INTERVAL", "60"))
+SENTIMENT_COOLDOWN = int(os.getenv("SENTIMENT_COOLDOWN", "300"))
+
+# =============================================================================
+# COMBINATORIAL ARBITRAGE
+# =============================================================================
+COMBO_MIN_EDGE_CENTS = int(os.getenv("COMBO_MIN_EDGE_CENTS", "3"))
+COMBO_COOLDOWN = int(os.getenv("COMBO_COOLDOWN", "300"))
+
+# =============================================================================
 # BOT BEHAVIOR
 # =============================================================================
 # How often to scan for opportunities (seconds)
 SCAN_INTERVAL_SECONDS = float(os.getenv("SCAN_INTERVAL_SECONDS", "5"))
 
+# How often to refresh market universe (seconds)
+MARKET_REFRESH_SECONDS = int(os.getenv("MARKET_REFRESH_SECONDS", "300"))
+
+# How often to refresh account balance (seconds)
+BALANCE_REFRESH_SECONDS = int(os.getenv("BALANCE_REFRESH_SECONDS", "60"))
+
 # Paper trading mode (no real orders)
 PAPER_TRADING = os.getenv("PAPER_TRADING", "true").lower() == "true"
 
+# Paper trading balance (used when PAPER_TRADING=true)
+PAPER_BALANCE_USD = float(os.getenv("PAPER_BALANCE_USD", "1000"))
+
+# Enable WebSocket feed for orderbook updates
+ENABLE_WEBSOCKET_FEED = os.getenv("ENABLE_WEBSOCKET_FEED", "false").lower() == "true"
+
 # Log level
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+
+# =============================================================================
+# RETRY / BACKOFF SETTINGS
+# =============================================================================
+RETRY_MAX_ATTEMPTS = int(os.getenv("RETRY_MAX_ATTEMPTS", "3"))
+RETRY_BASE_DELAY_SECONDS = float(os.getenv("RETRY_BASE_DELAY_SECONDS", "0.5"))
+RETRY_MAX_DELAY_SECONDS = float(os.getenv("RETRY_MAX_DELAY_SECONDS", "5"))
 
 # =============================================================================
 # RATE LIMITS (Polymarket CLOB)
@@ -116,6 +258,9 @@ MIN_PROFIT_MARGIN = 0.005  # 0.5%
 # =============================================================================
 DATA_DIR = PROJECT_ROOT / "data"
 LOGS_DIR = PROJECT_ROOT / "logs"
+
+# SQLite database path for persisted bot state
+BOT_STATE_DB = Path(os.getenv("BOT_STATE_DB", str(DATA_DIR / "bot_state.sqlite")))
 
 # Create directories if they don't exist
 DATA_DIR.mkdir(exist_ok=True)
@@ -143,7 +288,7 @@ def validate_config():
 
 def print_config():
     """Print current configuration (hiding sensitive data)"""
-    from termcolor import cprint
+    from .logging_utils import cprint
     
     cprint("\n" + "="*60, "cyan")
     cprint("📋 Bot Configuration", "cyan", attrs=["bold"])
@@ -170,6 +315,14 @@ def print_config():
     cprint(f"  Scan Interval: {SCAN_INTERVAL_SECONDS}s", "white")
     cprint(f"  Markets: {'Crypto only' if ONLY_CRYPTO_MARKETS else '🌍 ALL markets (political, sports, crypto)'}", "cyan" if not ONLY_CRYPTO_MARKETS else "white")
     cprint(f"  Log Level: {LOG_LEVEL}", "white")
+    
+    if ENABLE_BTC_5MIN:
+        cprint("\n₿  5-Min BTC Settings:", "cyan")
+        cprint(f"  Min BTC Move: {BTC_MIN_MOVE_PCT}%", "white")
+        cprint(f"  Reaction Window: {BTC_REACTION_WINDOW_SECONDS}s", "white")
+        cprint(f"  Terminal Window: {TERMINAL_CONVERGENCE_WINDOW_SECONDS}s", "white")
+        cprint(f"  Kelly Mode: {KELLY_FRACTION_MODE}", "white")
+        cprint(f"  Binance Feed: {'API key set' if BINANCE_API_KEY else 'Public (no auth)'}", "white")
     
     cprint("="*60 + "\n", "cyan")
 

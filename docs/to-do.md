@@ -1,20 +1,29 @@
 # Polymarket Bot - To-Do List
 
-**Last Updated:** February 2025
+**Last Updated:** February 2026
 
 ---
 
 ## 🔴 High Priority
 
 ### Infrastructure
-- [ ] **Persistence Layer:** Add SQLite for orders/positions/trades (state lost on restart)
-- [ ] **Balance Tracking:** Fix `client.py:get_balance()` - currently returns None
-- [ ] **Unit Tests:** Add pytest tests for strategies, risk_manager, order_manager
-- [ ] **Proper Logging:** Replace termcolor with Python `logging` module
-- [ ] **Market Data Refresh:** Markets only fetched once at startup - need periodic refresh
+- [x] **Persistence Layer:** Add SQLite for orders/positions/trades (state lost on restart)
+  - Implemented `src/persistence.py` + wired into bot/order_manager/risk_manager
+- [x] **Balance Tracking:** Fix `client.py:get_balance()` - currently returns None
+  - Added paper balance support + best-effort parsing for live API responses
+- [x] **Unit Tests:** Add pytest tests for strategies, risk_manager, order_manager
+  - Initial coverage: risk_manager, order_manager, spread_strategy
+- [x] **Proper Logging:** Replace termcolor with Python `logging` module
+  - Added `logging_utils.py` + replaced `termcolor` usage
+- [x] **Market Data Refresh:** Markets only fetched once at startup - need periodic refresh
+  - Added MARKET_REFRESH_SECONDS with periodic refresh loop
 
 ### Strategies
-- [ ] **Cross-Platform Arbitrage (Kalshi):** Integrate Kalshi API for cross-venue arb
+- [ ] **Cross-Platform Arbitrage (Kalshi):** Integrate Kalshi API for cross-venue arb (in progress)
+  - Added `kalshi_client.py` + `cross_platform_arbitrage_strategy.py`
+  - Configure `KALSHI_ACCESS_KEY` + `KALSHI_PRIVATE_KEY_PATH` and provide map file
+  - Sample map added: `data/kalshi_market_map.json`
+  - Live Kalshi order placement wired (guarded by KALSHI_TRADING_ENABLED)
 - [ ] **Combinatorial Arbitrage:** NLP-based detection of logical dependencies
 
 ---
@@ -22,8 +31,10 @@
 ## 🟡 Medium Priority
 
 ### Infrastructure
-- [ ] **WebSocket Feed:** Test and enable (currently disabled, using REST polling)
-- [ ] **Retry Logic:** Add exponential backoff for API failures
+- [x] **WebSocket Feed:** Test and enable (currently disabled, using REST polling)
+  - Added ENABLE_WEBSOCKET_FEED toggle + subscription refresh on market updates
+- [x] **Retry Logic:** Add exponential backoff for API failures
+  - Added retry/backoff helpers for Polymarket + Kalshi clients
 - [ ] **Fill Detection:** Use WebSocket events instead of polling every 10s
 
 ### Strategies (see STRATEGY_ROADMAP.md)

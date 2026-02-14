@@ -13,7 +13,7 @@ Example: Buy at 5¢, sell at 6¢ = 20% return per trade.
 
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
-from termcolor import cprint
+from ..logging_utils import cprint
 
 from .base_strategy import (
     BaseStrategy, 
@@ -31,6 +31,10 @@ from ..config import (
     MIN_PROFIT_MARGIN,
     CRYPTO_MARKET_KEYWORDS,
     ONLY_CRYPTO_MARKETS,
+    VOL_HIGH_THRESHOLD,
+    VOL_LOW_THRESHOLD,
+    VOL_HIGH_SPREAD_MULT,
+    VOL_LOW_SPREAD_MULT,
 )
 
 
@@ -62,6 +66,9 @@ class SpreadStrategy(BaseStrategy):
         self.price_improvement = self.config.get("price_improvement", 0)  # cents
         self.only_crypto = self.config.get("only_crypto", ONLY_CRYPTO_MARKETS)
         
+        # Binance feed for volatility-regime awareness (optional)
+        self.binance_feed = self.config.get("binance_feed")
+        
         # Track active positions and orders per market
         self.positions: Dict[str, float] = {}  # token_id -> position size
         self.pending_orders: Dict[str, Dict] = {}  # order_id -> order details
@@ -69,6 +76,10 @@ class SpreadStrategy(BaseStrategy):
         
         # Cooldown between trades on same market (seconds)
         self.trade_cooldown = self.config.get("trade_cooldown_seconds", 10)
+        
+        # Vol-regime state
+        self._vol_regime = "normal"  # "low", "normal", "high"
+        self._effective_min_spread = self.min_spread_cents
         
     def should_trade_market(self, market_data: MarketData) -> bool:
         """
@@ -108,6 +119,31 @@ class SpreadStrategy(BaseStrategy):
         
         return True
     
+    def _update_vol_regime(self) -> None:
+        """Adjust spread parameters based on Binance volatility regime."""
+        if not self.binance_feed:
+            self._vol_regime = "normal"
+            self._effective_min_spread = self.min_spread_cents
+            return
+
+        state = self.binance_feed.get_state()
+        if not state.connected or state.volatility_5m <= 0:
+            self._vol_regime = "normal"
+            self._effective_min_spread = self.min_spread_cents
+            return
+
+        vol = state.volatility_5m
+
+        if vol >= VOL_HIGH_THRESHOLD:
+            self._vol_regime = "high"
+            self._effective_min_spread = self.min_spread_cents * VOL_HIGH_SPREAD_MULT
+        elif vol <= VOL_LOW_THRESHOLD:
+            self._vol_regime = "low"
+            self._effective_min_spread = self.min_spread_cents * VOL_LOW_SPREAD_MULT
+        else:
+            self._vol_regime = "normal"
+            self._effective_min_spread = self.min_spread_cents
+
     def analyze(self, market_data: List[MarketData]) -> List[Signal]:
         """
         Analyze markets and generate spread trading signals.
@@ -116,6 +152,9 @@ class SpreadStrategy(BaseStrategy):
         1. Generate BUY signal at best_bid (or slightly better)
         2. Pre-calculate exit SELL at target price
         """
+        # Update vol regime before analysis
+        self._update_vol_regime()
+
         signals = []
         
         # Debug: show best spread found
@@ -324,6 +363,8 @@ class SpreadStrategy(BaseStrategy):
             "pending_orders_count": len(self.pending_orders),
             "min_spread_cents": self.min_spread_cents,
             "target_spread_cents": self.target_spread_cents,
+            "vol_regime": self._vol_regime,
+            "effective_min_spread": self._effective_min_spread,
         })
         return state
 

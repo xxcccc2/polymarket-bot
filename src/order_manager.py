@@ -14,7 +14,8 @@ from typing import Dict, List, Optional, Callable
 from datetime import datetime, timedelta
 from dataclasses import dataclass, field
 from enum import Enum
-from termcolor import cprint
+
+from .logging_utils import cprint
 
 from .config import (
     MAX_ACTIVE_ORDERS,
@@ -22,6 +23,7 @@ from .config import (
     PAPER_TRADING,
 )
 from .client import PolymarketClient
+from .persistence import SqliteStore
 
 
 class OrderStatus(Enum):
@@ -81,8 +83,9 @@ class OrderManager:
     - Fill callbacks for strategy notification
     """
     
-    def __init__(self, client: PolymarketClient):
+    def __init__(self, client: PolymarketClient, store: Optional[SqliteStore] = None):
         self.client = client
+        self.store = store
         
         # Active orders by order_id
         self.orders: Dict[str, Order] = {}
@@ -102,6 +105,78 @@ class OrderManager:
         # Cleanup thread
         self._cleanup_running = False
         self._cleanup_thread: Optional[threading.Thread] = None
+
+        # Load persisted orders if available
+        if self.store:
+            self._load_persisted_orders()
+
+    def _parse_datetime(self, value: Optional[str]) -> datetime:
+        if not value:
+            return datetime.now()
+        try:
+            return datetime.fromisoformat(value)
+        except ValueError:
+            return datetime.now()
+
+    def _order_to_record(self, order: Order) -> Dict:
+        return {
+            "order_id": order.order_id,
+            "token_id": order.token_id,
+            "market_slug": order.market_slug,
+            "side": order.side,
+            "price": order.price,
+            "size": order.size,
+            "filled_size": order.filled_size,
+            "status": order.status.value,
+            "order_type": order.order_type,
+            "created_at": order.created_at.isoformat(),
+            "updated_at": order.updated_at.isoformat(),
+            "metadata": order.metadata,
+        }
+
+    def _persist_order(self, order: Order) -> None:
+        if not self.store:
+            return
+        try:
+            self.store.save_order(self._order_to_record(order))
+        except Exception as e:
+            cprint(f"❌ Failed to persist order {order.order_id}: {e}", "red")
+
+    def _load_persisted_orders(self) -> None:
+        try:
+            records = self.store.load_orders()
+        except Exception as e:
+            cprint(f"❌ Failed to load persisted orders: {e}", "red")
+            return
+
+        for record in records:
+            try:
+                order = Order(
+                    order_id=record["order_id"],
+                    token_id=record["token_id"],
+                    market_slug=record.get("market_slug") or "",
+                    side=record["side"],
+                    price=float(record["price"]),
+                    size=float(record["size"]),
+                    filled_size=float(record.get("filled_size") or 0),
+                    status=OrderStatus(record.get("status", OrderStatus.OPEN.value)),
+                    order_type=record.get("order_type") or "GTC",
+                    created_at=self._parse_datetime(record.get("created_at")),
+                    updated_at=self._parse_datetime(record.get("updated_at")),
+                    metadata=record.get("metadata") or {},
+                )
+            except Exception as e:
+                cprint(f"❌ Failed to load persisted order: {e}", "red")
+                continue
+
+            self.orders[order.order_id] = order
+            self.orders_by_token.setdefault(order.token_id, []).append(order.order_id)
+
+        if self.orders:
+            self.total_orders_placed = len(self.orders)
+            self.total_orders_filled = sum(1 for o in self.orders.values() if o.status == OrderStatus.FILLED)
+            self.total_orders_cancelled = sum(1 for o in self.orders.values() if o.status == OrderStatus.CANCELLED)
+            cprint(f"📦 Loaded {len(self.orders)} persisted orders", "cyan")
     
     def on_fill(self, callback: Callable[[Order, Dict], None]):
         """Register callback for order fills."""
@@ -201,6 +276,7 @@ class OrderManager:
             cprint(f"📝 {order}", "cyan")
             
             result["order"] = order
+            self._persist_order(order)
         
         return result
     
@@ -238,6 +314,7 @@ class OrderManager:
                     cprint(f"❌ Cancel callback error: {e}", "red")
             
             cprint(f"🚫 Cancelled: {order} - {reason}", "yellow")
+            self._persist_order(order)
         
         return result
     
@@ -312,6 +389,8 @@ class OrderManager:
         else:
             order.status = OrderStatus.PARTIAL
             cprint(f"📊 Partial fill: {order}", "cyan")
+
+        self._persist_order(order)
         
         # Notify callbacks
         for callback in self._fill_callbacks:
@@ -377,22 +456,74 @@ class OrderManager:
         """
         Sync local order state with exchange.
         Call periodically to ensure consistency.
+        
+        Uses heuristic: if an order disappeared from the exchange and
+        we see a matching trade, it was filled. Otherwise, assume cancelled.
         """
         try:
             exchange_orders = self.client.get_open_orders()
             exchange_ids = {o.get("id") or o.get("orderID") for o in exchange_orders}
             
+            # Also fetch recent trades to distinguish fills from cancels
+            recent_trades = []
+            try:
+                recent_trades = self.client.get_trades(limit=100)
+            except Exception:
+                pass
+            recent_trade_order_ids = {
+                t.get("order_id") or t.get("orderID", "")
+                for t in recent_trades
+            }
+            
             # Mark orders as filled/cancelled if not on exchange
             for order_id, order in self.orders.items():
                 if order.is_active and order_id not in exchange_ids:
-                    # Order no longer on exchange - assume filled or cancelled
-                    if not PAPER_TRADING:
+                    if PAPER_TRADING:
+                        continue
+                    
+                    # Check if we have a matching trade → filled
+                    if order_id in recent_trade_order_ids:
                         order.status = OrderStatus.FILLED
-                        order.updated_at = datetime.now()
-                        cprint(f"🔄 Synced: {order} (removed from exchange)", "cyan")
+                        order.filled_size = order.size
+                        self.total_orders_filled += 1
+                        cprint(f"🔄 Synced FILL: {order}", "green")
+                    else:
+                        # No matching trade → likely cancelled by exchange
+                        order.status = OrderStatus.CANCELLED
+                        self.total_orders_cancelled += 1
+                        cprint(f"🔄 Synced CANCEL: {order} (removed from exchange)", "yellow")
+                    
+                    order.updated_at = datetime.now()
+                    self._persist_order(order)
             
         except Exception as e:
             cprint(f"❌ Sync error: {e}", "red")
+
+    def cancel_expired_market_orders(self, expired_condition_ids: set) -> int:
+        """
+        Cancel all active orders for markets that have expired/resolved.
+        
+        Args:
+            expired_condition_ids: Set of condition IDs for expired markets
+            
+        Returns:
+            Number of orders cancelled
+        """
+        cancelled = 0
+        for order_id, order in list(self.orders.items()):
+            if not order.is_active:
+                continue
+            # Check if token belongs to an expired market
+            token_id = order.token_id
+            # Token IDs are associated with condition IDs in market data
+            if token_id in expired_condition_ids or order.market_slug in expired_condition_ids:
+                result = self.cancel_order(order_id, "Market expired/resolved")
+                if result.get("success"):
+                    cancelled += 1
+        
+        if cancelled:
+            cprint(f"🧹 Cancelled {cancelled} orders for expired markets", "yellow")
+        return cancelled
 
 
 

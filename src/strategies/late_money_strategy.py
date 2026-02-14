@@ -20,7 +20,7 @@ Strategy:
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
 from collections import defaultdict
-from termcolor import cprint
+from ..logging_utils import cprint
 
 from .base_strategy import (
     BaseStrategy,

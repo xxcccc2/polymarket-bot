@@ -17,7 +17,7 @@ Example:
 
 from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
-from termcolor import cprint
+from ..logging_utils import cprint
 
 from .base_strategy import (
     BaseStrategy,

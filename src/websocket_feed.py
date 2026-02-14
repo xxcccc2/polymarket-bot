@@ -15,7 +15,7 @@ import threading
 from typing import Dict, List, Callable, Optional, Set
 from datetime import datetime
 from dataclasses import dataclass
-from termcolor import cprint
+from .logging_utils import cprint
 import websocket
 
 from .config import WS_URL

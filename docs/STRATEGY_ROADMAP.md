@@ -1,6 +1,6 @@
 # Polymarket Bot - Strategy Roadmap
 
-**Last Updated:** February 2025  
+**Last Updated:** February 2026  
 **Status:** Active Development
 
 ---
@@ -14,7 +14,7 @@
 | Stink Bid | ✅ Implemented | - | Low | 100x potential |
 | Favorite-Longshot Bias | ✅ Implemented | - | Low | 10-20% |
 | Late Money | ✅ Implemented | - | Medium | 3-8% |
-| **Cross-Platform Arbitrage** | 🔴 Not Started | **HIGH** | Medium | 2-5% risk-free |
+| **Cross-Platform Arbitrage** | � In Progress | **HIGH** | Medium | 2-5% risk-free |
 | Anchoring Bias | 🔴 Not Started | Medium | Low | 5-10% |
 | Overreaction/Mean-Reversion | 🔴 Not Started | Medium | Medium | 2-5% |
 | Time Decay | 🔴 Not Started | Medium | Low | 5-15% |
@@ -111,11 +111,12 @@
 
 **Implementation:**
 ```
-1. Integrate Kalshi API (predmarket SDK or custom)
+1. Integrate Kalshi API (custom client + RSA signing)
 2. Match identical markets across platforms
 3. Monitor combined prices (YES_poly + NO_kalshi)
 4. Execute when total < $1 (accounting for fees on both sides)
 5. Handle settlement timing differences
+6. Place Kalshi hedge leg (auth required) when KALSHI_TRADING_ENABLED=true
 ```
 
 **Risks:**
@@ -342,14 +343,17 @@ def kelly_fraction(p: float, b: float) -> float:
 | Capability | Status | Priority |
 |------------|--------|----------|
 | REST API polling | ✅ Working | - |
-| WebSocket feed | ⚠️ Disabled | Medium |
-| Persistence (SQLite) | ❌ Missing | **High** |
-| Unit tests | ❌ Missing | **High** |
-| Proper logging | ❌ Missing | Medium |
-| Balance tracking | ⚠️ Incomplete | High |
+| WebSocket feed | ✅ Enabled (config toggle) | Medium |
+| Persistence (SQLite) | ✅ Implemented | **High** |
+| Unit tests | ✅ Implemented (initial coverage) | **High** |
+| Proper logging | ✅ Implemented | Medium |
+| Balance tracking | ✅ Implemented | High |
+| Market data refresh | ✅ Implemented | High |
+| Kalshi API integration | 🟡 In Progress | **High** |
 | Cross-platform (Kalshi) | ❌ Missing | **High** |
+| Retry/backoff | ✅ Implemented | Medium |
 | News/sentiment feed | ❌ Missing | Medium |
-| Blockchain indexing | ❌ Missing | Low |
+| Blockchain/BinanceAPI indexing | ❌ Missing | Low |
 
 ---
 
@@ -357,10 +361,12 @@ def kelly_fraction(p: float, b: float) -> float:
 
 ### Phase 1: Foundation (Current)
 1. ✅ Core strategies implemented (5/5)
-2. 🔄 Fix balance tracking in `client.py`
-3. 🔄 Add SQLite persistence for orders/positions
-4. 🔄 Add unit tests for core components
-5. 🔄 Implement proper logging (replace termcolor)
+2. ✅ Fix balance tracking in `client.py` (paper + live parsing)
+3. ✅ Add SQLite persistence for orders/positions/trades
+4. ✅ Add unit tests for core components
+5. ✅ Implement proper logging (replace termcolor)
+6. ✅ Implement periodic market refresh (MARKET_REFRESH_SECONDS)
+7. ✅ Enable WebSocket feed toggle + subscription refresh
 
 ### Phase 2: Cross-Platform
 1. Integrate Kalshi API

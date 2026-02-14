@@ -15,7 +15,7 @@ This is an asymmetric bet strategy - small losses, huge potential wins.
 
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
-from termcolor import cprint
+from ..logging_utils import cprint
 
 from .base_strategy import (
     BaseStrategy,

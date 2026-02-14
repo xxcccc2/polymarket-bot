@@ -19,7 +19,7 @@ Expected edge: 10-20% improvement over random selection.
 
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
-from termcolor import cprint
+from ..logging_utils import cprint
 
 from .base_strategy import (
     BaseStrategy,

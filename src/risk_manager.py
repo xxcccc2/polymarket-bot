@@ -14,7 +14,8 @@ from typing import Dict, List, Optional, Callable
 from datetime import datetime, date
 from dataclasses import dataclass, field
 from enum import Enum
-from termcolor import cprint
+
+from .logging_utils import cprint
 
 from .config import (
     MAX_POSITION_USD,
@@ -24,7 +25,26 @@ from .config import (
     MIN_BALANCE_USD,
     MIN_PRICE_CENTS,
     MAX_PRICE_CENTS,
+    ORDER_SIZE_USD,
 )
+from .persistence import SqliteStore
+
+
+# =============================================================================
+# ADAPTIVE RISK CONSTANTS (bankroll-proportional)
+# These override the fixed USD limits when adaptive mode is on.
+# =============================================================================
+# Overridable via config dict passed to RiskManager
+DEFAULT_ADAPTIVE_PARAMS = {
+    "enabled": True,
+    "max_position_pct": 0.12,        # 12% of bankroll per market
+    "max_exposure_pct": 0.30,         # 30% total exposure
+    "max_single_trade_pct": 0.04,     # 4% per trade
+    "daily_loss_limit_pct": 0.06,     # 6% daily loss limit
+    "drawdown_throttle_pct": 0.05,    # At 5% drawdown → half size
+    "drawdown_halt_pct": 0.12,        # At 12% drawdown → halt
+    "min_balance_floor_pct": 0.70,    # Never let balance drop below 70% of starting
+}
 
 
 class RiskLevel(Enum):
@@ -94,9 +114,16 @@ class RiskManager:
     - Balance monitoring
     """
     
-    def __init__(self):
+    def __init__(
+        self,
+        store: Optional[SqliteStore] = None,
+        adaptive_config: Optional[Dict] = None,
+    ):
         # Positions by token_id
         self.positions: Dict[str, Position] = {}
+
+        # Optional persistence store
+        self.store = store
         
         # Daily stats (resets each day)
         self._daily_stats: Dict[date, DailyStats] = {}
@@ -111,12 +138,93 @@ class RiskManager:
         # Balance tracking
         self.current_balance: float = 0
         self.starting_balance: float = 0
+        self.session_peak_balance: float = 0
+        
+        # Adaptive risk management
+        _ac = dict(DEFAULT_ADAPTIVE_PARAMS)
+        if adaptive_config:
+            _ac.update(adaptive_config)
+        self.adaptive_enabled: bool = _ac["enabled"]
+        self.adaptive_max_position_pct: float = _ac["max_position_pct"]
+        self.adaptive_max_exposure_pct: float = _ac["max_exposure_pct"]
+        self.adaptive_max_trade_pct: float = _ac["max_single_trade_pct"]
+        self.adaptive_daily_loss_pct: float = _ac["daily_loss_limit_pct"]
+        self.adaptive_dd_throttle_pct: float = _ac["drawdown_throttle_pct"]
+        self.adaptive_dd_halt_pct: float = _ac["drawdown_halt_pct"]
+        self.adaptive_balance_floor_pct: float = _ac["min_balance_floor_pct"]
+        
+        # Throttle state
+        self._throttle_factor: float = 1.0   # 1.0 = normal, 0.5 = half size, 0.0 = halt
         
         # Callbacks
         self._risk_callbacks: List[Callable[[RiskLevel, str], None]] = []
         
         # Initialize today's stats
         self._get_or_create_daily_stats()
+
+        # Load persisted positions if available
+        if self.store:
+            self._load_persisted_positions()
+
+    def _parse_datetime(self, value: Optional[str]) -> datetime:
+        if not value:
+            return datetime.now()
+        try:
+            return datetime.fromisoformat(value)
+        except ValueError:
+            return datetime.now()
+
+    def _position_to_record(self, position: Position) -> Dict[str, Optional[float]]:
+        return {
+            "token_id": position.token_id,
+            "market_slug": position.market_slug,
+            "side": position.side,
+            "size": position.size,
+            "avg_price": position.avg_price,
+            "current_price": position.current_price,
+            "unrealized_pnl": position.unrealized_pnl,
+            "realized_pnl": position.realized_pnl,
+            "opened_at": position.opened_at.isoformat(),
+            "updated_at": position.updated_at.isoformat(),
+        }
+
+    def _persist_position(self, position: Position) -> None:
+        if not self.store:
+            return
+        try:
+            self.store.save_position(self._position_to_record(position))
+        except Exception as e:
+            cprint(f"❌ Failed to persist position {position.token_id}: {e}", "red")
+
+    def _load_persisted_positions(self) -> None:
+        try:
+            records = self.store.load_positions()
+        except Exception as e:
+            cprint(f"❌ Failed to load persisted positions: {e}", "red")
+            return
+
+        for record in records:
+            try:
+                position = Position(
+                    token_id=record["token_id"],
+                    market_slug=record.get("market_slug") or "",
+                    side=record.get("side") or "YES",
+                    size=float(record.get("size") or 0),
+                    avg_price=float(record.get("avg_price") or 0),
+                    current_price=float(record.get("current_price") or 0),
+                    unrealized_pnl=float(record.get("unrealized_pnl") or 0),
+                    realized_pnl=float(record.get("realized_pnl") or 0),
+                    opened_at=self._parse_datetime(record.get("opened_at")),
+                    updated_at=self._parse_datetime(record.get("updated_at")),
+                )
+            except Exception as e:
+                cprint(f"❌ Failed to load persisted position: {e}", "red")
+                continue
+
+            self.positions[position.token_id] = position
+
+        if self.positions:
+            cprint(f"📦 Loaded {len(self.positions)} persisted positions", "cyan")
     
     def on_risk_change(self, callback: Callable[[RiskLevel, str], None]):
         """Register callback for risk level changes."""
@@ -137,19 +245,36 @@ class RiskManager:
         if stats.peak_balance == 0:
             stats.peak_balance = balance
             self.starting_balance = balance
+            self.session_peak_balance = balance
         else:
             stats.peak_balance = max(stats.peak_balance, balance)
+            self.session_peak_balance = max(self.session_peak_balance, balance)
         
         # Check balance thresholds
         self._check_balance_risk()
+        
+        # Update adaptive throttle
+        if self.adaptive_enabled:
+            self._update_throttle()
     
     def _check_balance_risk(self):
         """Check if balance triggers risk alerts."""
+        # Fixed floor check
         if self.current_balance < MIN_BALANCE_USD:
             self._set_risk_level(
                 RiskLevel.CRITICAL,
                 f"Balance ${self.current_balance:.2f} below minimum ${MIN_BALANCE_USD}"
             )
+            return
+        
+        # Adaptive floor check (never drop below X% of starting balance)
+        if self.adaptive_enabled and self.starting_balance > 0:
+            floor = self.starting_balance * self.adaptive_balance_floor_pct
+            if self.current_balance < floor:
+                self._set_risk_level(
+                    RiskLevel.HALTED,
+                    f"Balance ${self.current_balance:.2f} below {self.adaptive_balance_floor_pct*100:.0f}% floor (${floor:.2f})"
+                )
     
     def _set_risk_level(self, level: RiskLevel, reason: str):
         """Update risk level and notify callbacks."""
@@ -186,14 +311,19 @@ class RiskManager:
         if self.risk_level == RiskLevel.CRITICAL:
             return False, "Risk level critical"
         
-        # Check daily loss limit
+        # Check daily loss limit (adaptive or fixed)
         stats = self._get_or_create_daily_stats()
-        if stats.realized_pnl < -DAILY_LOSS_LIMIT_USD:
+        daily_limit = self._get_daily_loss_limit()
+        if stats.realized_pnl < -daily_limit:
             self._set_risk_level(
                 RiskLevel.HALTED,
-                f"Daily loss limit reached: ${stats.realized_pnl:.2f}"
+                f"Daily loss limit reached: ${stats.realized_pnl:.2f} (limit: ${daily_limit:.2f})"
             )
             return False, f"Daily loss limit reached"
+        
+        # Check drawdown halt
+        if self._throttle_factor <= 0:
+            return False, "Drawdown halt active"
         
         return True, "OK"
     
@@ -224,17 +354,21 @@ class RiskManager:
         if price_cents < MIN_PRICE_CENTS or price_cents > MAX_PRICE_CENTS:
             return False, f"Price {price_cents:.0f}¢ outside safe range ({MIN_PRICE_CENTS}-{MAX_PRICE_CENTS}¢)"
         
+        # Compute dynamic limits based on bankroll
+        max_pos = self._get_max_position()
+        max_exp = self._get_max_exposure()
+        
         # Check per-market position limit
         existing = self.positions.get(token_id)
         existing_size = existing.market_value if existing else 0
         
-        if existing_size + size_usd > MAX_POSITION_USD:
-            return False, f"Would exceed position limit: ${existing_size + size_usd:.0f} > ${MAX_POSITION_USD}"
+        if existing_size + size_usd > max_pos:
+            return False, f"Would exceed position limit: ${existing_size + size_usd:.0f} > ${max_pos:.0f}"
         
         # Check total exposure
         total_exposure = self.get_total_exposure()
-        if total_exposure + size_usd > MAX_TOTAL_EXPOSURE_USD:
-            return False, f"Would exceed total exposure: ${total_exposure + size_usd:.0f} > ${MAX_TOTAL_EXPOSURE_USD}"
+        if total_exposure + size_usd > max_exp:
+            return False, f"Would exceed total exposure: ${total_exposure + size_usd:.0f} > ${max_exp:.0f}"
         
         return True, "OK"
     
@@ -280,6 +414,7 @@ class RiskManager:
                 current_price=price
             )
             cprint(f"📈 New position: {market_slug} {side} {size_delta:.2f} @ ${price:.3f}", "green")
+            self._persist_position(self.positions[token_id])
         else:
             position = self.positions[token_id]
             
@@ -301,11 +436,18 @@ class RiskManager:
             
             position.current_price = price
             position.updated_at = datetime.now()
+
+            self._persist_position(position)
             
             # Remove closed positions
             if position.size <= 0.001:
                 del self.positions[token_id]
                 cprint(f"📉 Position closed: {market_slug}", "yellow")
+                if self.store:
+                    try:
+                        self.store.delete_position(token_id)
+                    except Exception as e:
+                        cprint(f"❌ Failed to delete persisted position {token_id}: {e}", "red")
     
     def update_prices(self, prices: Dict[str, float]):
         """
@@ -325,6 +467,78 @@ class RiskManager:
         stats.volume_usd += volume_usd
         stats.fees_paid += fee_usd
     
+    # ------------------------------------------------------------------
+    # Adaptive risk helpers
+    # ------------------------------------------------------------------
+
+    def _get_max_position(self) -> float:
+        """Max position per market (adaptive or fixed)."""
+        if self.adaptive_enabled and self.current_balance > 0:
+            return self.current_balance * self.adaptive_max_position_pct * self._throttle_factor
+        return MAX_POSITION_USD
+
+    def _get_max_exposure(self) -> float:
+        """Max total exposure (adaptive or fixed)."""
+        if self.adaptive_enabled and self.current_balance > 0:
+            return self.current_balance * self.adaptive_max_exposure_pct * self._throttle_factor
+        return MAX_TOTAL_EXPOSURE_USD
+
+    def _get_daily_loss_limit(self) -> float:
+        """Daily loss limit (adaptive or fixed)."""
+        if self.adaptive_enabled and self.current_balance > 0:
+            return self.current_balance * self.adaptive_daily_loss_pct
+        return DAILY_LOSS_LIMIT_USD
+
+    def get_adaptive_order_size(self, base_size: float = 0) -> float:
+        """Get throttle-adjusted order size.
+
+        Strategies should call this to get the right-sized order.
+        Returns a dollar amount that respects drawdown throttling
+        and bankroll proportional limits.
+        """
+        if base_size <= 0:
+            base_size = ORDER_SIZE_USD
+
+        if self.adaptive_enabled and self.current_balance > 0:
+            max_trade = self.current_balance * self.adaptive_max_trade_pct
+            size = min(base_size, max_trade) * self._throttle_factor
+            return round(max(size, 0.50), 2)  # floor at 50¢
+
+        return base_size
+
+    def _update_throttle(self) -> None:
+        """Update the throttle factor based on drawdown from session peak."""
+        if self.session_peak_balance <= 0:
+            self._throttle_factor = 1.0
+            return
+
+        drawdown = (self.session_peak_balance - self.current_balance) / self.session_peak_balance
+
+        if drawdown >= self.adaptive_dd_halt_pct:
+            self._throttle_factor = 0.0
+            self._set_risk_level(
+                RiskLevel.HALTED,
+                f"Drawdown {drawdown*100:.1f}% exceeded halt threshold ({self.adaptive_dd_halt_pct*100:.0f}%)"
+            )
+        elif drawdown >= self.adaptive_dd_throttle_pct:
+            # Linear throttle between throttle threshold and halt threshold
+            range_pct = self.adaptive_dd_halt_pct - self.adaptive_dd_throttle_pct
+            progress = (drawdown - self.adaptive_dd_throttle_pct) / range_pct if range_pct > 0 else 1.0
+            self._throttle_factor = max(0.25, 1.0 - progress * 0.75)
+            if self.risk_level != RiskLevel.WARNING:
+                self._set_risk_level(
+                    RiskLevel.WARNING,
+                    f"Drawdown {drawdown*100:.1f}% — throttling to {self._throttle_factor*100:.0f}% size"
+                )
+        else:
+            self._throttle_factor = 1.0
+            if self.risk_level in (RiskLevel.WARNING,) and not self.is_halted:
+                self.risk_level = RiskLevel.NORMAL
+
+    def get_throttle_factor(self) -> float:
+        """Return current throttle factor (1.0 = normal, 0 = halted)."""
+        return self._throttle_factor
+
     def resume_trading(self):
         """Resume trading after halt."""
         if self.is_halted:
@@ -332,26 +546,36 @@ class RiskManager:
             self.is_halted = False
             self.halt_reason = None
             self.risk_level = RiskLevel.NORMAL
+            self._throttle_factor = 1.0
     
     def get_status(self) -> Dict:
         """Get current risk status."""
         stats = self._get_or_create_daily_stats()
+        max_exp = self._get_max_exposure()
         
         return {
             "risk_level": self.risk_level.value,
             "is_halted": self.is_halted,
             "halt_reason": self.halt_reason,
             "current_balance": self.current_balance,
+            "starting_balance": self.starting_balance,
+            "session_peak": self.session_peak_balance,
             "total_exposure": self.get_total_exposure(),
             "exposure_pct": (
-                (self.get_total_exposure() / MAX_TOTAL_EXPOSURE_USD) * 100
-                if MAX_TOTAL_EXPOSURE_USD > 0 else 0
+                (self.get_total_exposure() / max_exp) * 100
+                if max_exp > 0 else 0
             ),
             "positions_count": len(self.positions),
             "unrealized_pnl": self.get_total_unrealized_pnl(),
             "daily_pnl": stats.realized_pnl,
             "daily_trades": stats.trades_count,
             "daily_volume": stats.volume_usd,
+            "throttle_factor": self._throttle_factor,
+            "adaptive_enabled": self.adaptive_enabled,
+            "dynamic_max_position": round(self._get_max_position(), 2),
+            "dynamic_max_exposure": round(max_exp, 2),
+            "dynamic_daily_loss_limit": round(self._get_daily_loss_limit(), 2),
+            "dynamic_order_size": self.get_adaptive_order_size(),
         }
     
     def print_status(self):
@@ -373,7 +597,7 @@ class RiskManager:
         if status['is_halted']:
             cprint(f"  ⛔ HALTED: {status['halt_reason']}", "red", attrs=["bold"])
         
-        cprint(f"\n  Balance: ${status['current_balance']:.2f}", "white")
+        cprint(f"\n  Balance: ${status['current_balance']:.2f} (started: ${status['starting_balance']:.2f}, peak: ${status['session_peak']:.2f})", "white")
         cprint(f"  Exposure: ${status['total_exposure']:.2f} ({status['exposure_pct']:.1f}%)", "white")
         cprint(f"  Positions: {status['positions_count']}", "white")
         
@@ -384,6 +608,14 @@ class RiskManager:
         cprint(f"\n  Daily PnL: ${status['daily_pnl']:.2f}", daily_color)
         cprint(f"  Daily Trades: {status['daily_trades']}", "white")
         cprint(f"  Daily Volume: ${status['daily_volume']:.2f}", "white")
+        
+        if status['adaptive_enabled']:
+            cprint(f"\n  🔄 Adaptive Risk (bankroll-proportional):", "cyan")
+            cprint(f"    Throttle: {status['throttle_factor']*100:.0f}%", "white")
+            cprint(f"    Max Position: ${status['dynamic_max_position']:.2f}", "white")
+            cprint(f"    Max Exposure: ${status['dynamic_max_exposure']:.2f}", "white")
+            cprint(f"    Daily Loss Limit: ${status['dynamic_daily_loss_limit']:.2f}", "white")
+            cprint(f"    Order Size: ${status['dynamic_order_size']:.2f}", "white")
         
         cprint("="*50 + "\n", "cyan")
 

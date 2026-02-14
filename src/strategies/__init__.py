@@ -34,6 +34,13 @@ from .arbitrage_strategy import ArbitrageStrategy
 from .stink_bid_strategy import StinkBidStrategy
 from .favorite_longshot_strategy import FavoriteLongshotStrategy
 from .late_money_strategy import LateMoneyStrategy
+from .cross_platform_arbitrage_strategy import CrossPlatformArbitrageStrategy
+from .cross_asset_strategy import CrossAssetStrategy
+from .terminal_convergence_strategy import TerminalConvergenceStrategy
+from .orderbook_imbalance_strategy import OrderbookImbalanceStrategy
+from .vpin_strategy import VPINStrategy
+from .sentiment_strategy import SentimentStrategy
+from .combinatorial_arb_strategy import CombinatorialArbStrategy
 
 # Registry of available strategies
 AVAILABLE_STRATEGIES = {
@@ -42,9 +49,13 @@ AVAILABLE_STRATEGIES = {
     "stink_bid": StinkBidStrategy,
     "favorite_longshot": FavoriteLongshotStrategy,
     "late_money": LateMoneyStrategy,
-    # Add new strategies here:
-    # "anchoring": AnchoringStrategy,
-    # "overreaction": OverreactionStrategy,
+    "cross_platform_arbitrage": CrossPlatformArbitrageStrategy,
+    "cross_asset": CrossAssetStrategy,
+    "terminal_convergence": TerminalConvergenceStrategy,
+    "orderbook_imbalance": OrderbookImbalanceStrategy,
+    "vpin": VPINStrategy,
+    "sentiment": SentimentStrategy,
+    "combinatorial_arb": CombinatorialArbStrategy,
 }
 
 
@@ -66,7 +77,7 @@ def get_strategy(name: str, **kwargs) -> BaseStrategy:
         available = ", ".join(AVAILABLE_STRATEGIES.keys())
         raise ValueError(f"Unknown strategy '{name}'. Available: {available}")
     
-    return AVAILABLE_STRATEGIES[name](**kwargs)
+    return AVAILABLE_STRATEGIES[name](config=kwargs if kwargs else None)
 
 
 def list_strategies() -> dict:
