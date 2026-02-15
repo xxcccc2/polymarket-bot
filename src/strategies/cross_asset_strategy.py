@@ -79,15 +79,15 @@ class CrossAssetStrategy(BaseStrategy):
         if not ENABLE_BTC_5MIN:
             return False
 
-        q = market_data.question.lower()
+        text = f"{market_data.question} {market_data.market_slug}".lower()
 
         # Must be a BTC market
-        is_btc = any(kw in q for kw in ["bitcoin", "btc"])
+        is_btc = any(kw in text for kw in ["bitcoin", "btc"])
         if not is_btc:
             return False
 
-        # Must be a 5-minute market
-        is_5min = any(kw in q for kw in BTC_5MIN_KEYWORDS)
+        # Must be a short-term market
+        is_5min = any(kw in text for kw in BTC_5MIN_KEYWORDS)
         if not is_5min:
             return False
 
@@ -142,9 +142,16 @@ class CrossAssetStrategy(BaseStrategy):
             "cyan",
         )
 
+        n_eligible = 0
+        n_parsed = 0
+        n_direction_match = 0
+        n_edge_ok = 0
+        best_edge = -999.0
+
         for data in market_data:
             if not self.should_trade_market(data):
                 continue
+            n_eligible += 1
 
             # Position limit check
             current_pos = self.positions.get(data.token_id, 0)
@@ -157,11 +164,13 @@ class CrossAssetStrategy(BaseStrategy):
 
             if trade_side is None:
                 continue
+            n_parsed += 1
 
             # Should we buy or skip based on BTC direction?
             should_buy = self._should_buy(btc_direction, market_type, trade_side)
             if not should_buy:
                 continue
+            n_direction_match += 1
 
             # Calculate edge: difference between our estimated fair value
             # and current market price
@@ -174,10 +183,12 @@ class CrossAssetStrategy(BaseStrategy):
 
             # Edge = our estimate - market price (for a BUY)
             edge = estimated_prob - market_prob
+            best_edge = max(best_edge, edge)
 
             if edge < 0.01:  # less than 1 cent edge → not worth it
                 self._signals_skipped += 1
                 continue
+            n_edge_ok += 1
 
             # Confidence based on move size and edge
             confidence = min(
@@ -227,11 +238,28 @@ class CrossAssetStrategy(BaseStrategy):
             )
 
             signals.append(signal)
+
+        # Keep only the top 3 signals by edge (avoid order flood)
+        max_signals_per_cycle = 3
+        if len(signals) > max_signals_per_cycle:
+            signals.sort(key=lambda s: s.metadata.get("edge", 0), reverse=True)
+            signals = signals[:max_signals_per_cycle]
+
+        for sig in signals:
             self.signals_generated += 1
             self._signals_fired += 1
-            self.last_signal_time[data.token_id] = time.time()
+            self.last_signal_time[sig.token_id] = time.time()
+            cprint(f"  🎯 {sig}", "green")
 
-            cprint(f"  🎯 {signal}", "green")
+        # Diagnostic summary when BTC moved but no signals
+        if not signals and n_eligible > 0:
+            edge_str = f"{best_edge*100:+.1f}¢" if best_edge > -999 else "n/a"
+            cprint(
+                f"  📊 cross_asset funnel: {n_eligible} eligible → "
+                f"{n_parsed} parsed → {n_direction_match} dir_match → "
+                f"{n_edge_ok} edge_ok (best={edge_str})",
+                "dark_grey",
+            )
 
         return signals
 
@@ -287,13 +315,23 @@ class CrossAssetStrategy(BaseStrategy):
 
         Returns:
             (trade_side, market_type) where:
-            - trade_side: "YES" or "NO" to buy
-            - market_type: "UP" or "DOWN" — what the YES outcome means
+            - trade_side: "YES" — always buying the token
+            - market_type: "UP" or "DOWN" — what buying this token means
             Returns (None, None) if unparseable.
         """
         q = question.lower()
+        outcome_lower = outcome.lower()
 
-        # Detect what YES means in this market
+        # Handle "Bitcoin Up or Down" format (outcomes = "Up" / "Down")
+        if "up or down" in q:
+            if outcome_lower == "up":
+                return "YES", "UP"
+            elif outcome_lower == "down":
+                return "YES", "DOWN"
+            else:
+                return None, None
+
+        # Traditional format: "Will BTC go above $97,500?"
         up_keywords = ["go up", "above", "higher", "rise", "over", "up by", "increase"]
         down_keywords = ["go down", "below", "lower", "fall", "under", "drop", "decrease"]
 
@@ -307,7 +345,6 @@ class CrossAssetStrategy(BaseStrategy):
         else:
             return None, None
 
-        # outcome tells us if this token_id represents YES or NO
         trade_side = outcome  # "YES" or "NO"
         return trade_side, market_type
 
@@ -366,8 +403,14 @@ class CrossAssetStrategy(BaseStrategy):
 
         # Apply direction
         q = market_data.question.lower()
-        up_keywords = ["go up", "above", "higher", "rise", "over", "up by", "increase"]
-        is_up_market = any(kw in q for kw in up_keywords)
+        outcome_lower = market_data.outcome.lower()
+        
+        # Determine if this token benefits from price going UP
+        if "up or down" in q:
+            is_up_market = outcome_lower == "up"
+        else:
+            up_keywords = ["go up", "above", "higher", "rise", "over", "up by", "increase"]
+            is_up_market = any(kw in q for kw in up_keywords)
 
         if (btc_direction == "UP" and is_up_market) or \
            (btc_direction == "DOWN" and not is_up_market):

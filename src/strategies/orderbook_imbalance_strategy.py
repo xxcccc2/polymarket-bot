@@ -72,19 +72,15 @@ class OrderbookImbalanceStrategy(BaseStrategy):
         self.signal_cooldown_s = self.config.get("signal_cooldown_s", 20)
 
     def should_trade_market(self, market_data: MarketData) -> bool:
-        """Filter for markets with orderbook data."""
+        """Filter for BTC markets (orderbook data optional — falls back to spread+Binance)."""
         if self.only_5min_btc:
             if not ENABLE_BTC_5MIN:
                 return False
-            q = market_data.question.lower()
-            is_btc = any(kw in q for kw in ["bitcoin", "btc"])
-            is_5min = any(kw in q for kw in BTC_5MIN_KEYWORDS)
+            text = f"{market_data.question} {market_data.market_slug}".lower()
+            is_btc = any(kw in text for kw in ["bitcoin", "btc"])
+            is_5min = any(kw in text for kw in BTC_5MIN_KEYWORDS)
             if not (is_btc and is_5min):
                 return False
-
-        # Need orderbook data
-        if not market_data.orderbook:
-            return False
 
         # Cooldown
         last_t = self.last_signal_time.get(market_data.token_id, 0)
@@ -122,8 +118,8 @@ class OrderbookImbalanceStrategy(BaseStrategy):
             if current_pos >= self.max_position_usd:
                 continue
 
-            # Calculate imbalance from orderbook
-            imbalance = self._calculate_imbalance(data.orderbook)
+            # Calculate imbalance from orderbook (or fall back to spread proxy)
+            imbalance = self._calculate_imbalance(data.orderbook, data)
             if imbalance is None:
                 continue
 
@@ -139,18 +135,23 @@ class OrderbookImbalanceStrategy(BaseStrategy):
 
                 # Parse market direction
                 q = data.question.lower()
-                up_keywords = ["go up", "above", "higher", "rise", "over"]
-                is_up_market = any(kw in q for kw in up_keywords)
+                outcome_lower = data.outcome.lower()
+                
+                if "up or down" in q:
+                    is_up_market = outcome_lower == "up"
+                else:
+                    up_keywords = ["go up", "above", "higher", "rise", "over"]
+                    is_up_market = any(kw in q for kw in up_keywords)
 
                 # Determine if orderbook direction agrees with Binance
                 ob_bullish = direction == "BUY"  # more bids = bullish
 
                 if is_up_market:
-                    # For an "above" market, bullish OB + BTC UP = buy YES
+                    # For an "above"/"up" market, bullish OB + BTC UP = buy
                     binance_agrees = (ob_bullish and binance_direction == "UP") or \
                                      (not ob_bullish and binance_direction == "DOWN")
                 else:
-                    # For a "below" market, bearish OB + BTC DOWN = buy YES
+                    # For a "below"/"down" market, bearish OB + BTC DOWN = buy
                     binance_agrees = (not ob_bullish and binance_direction == "DOWN") or \
                                      (ob_bullish and binance_direction == "UP")
 
@@ -257,62 +258,65 @@ class OrderbookImbalanceStrategy(BaseStrategy):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _calculate_imbalance(orderbook: Optional[Dict]):
+    def _calculate_imbalance(orderbook: Optional[Dict], market_data=None):
         """
         Calculate bid/ask volume imbalance from an orderbook dict.
-
-        Expected orderbook format (Polymarket CLOB):
-            {"bids": [{"price": "0.55", "size": "100"}, ...],
-             "asks": [{"price": "0.57", "size": "80"}, ...]}
+        Falls back to spread-based proxy when orderbook is unavailable.
 
         Returns:
             (bid_volume, ask_volume, ratio, direction) or None
             direction is "BUY" if bid-heavy, "SELL" if ask-heavy
         """
-        if not orderbook:
-            return None
+        if orderbook:
+            bids = orderbook.get("bids", [])
+            asks = orderbook.get("asks", [])
 
-        bids = orderbook.get("bids", [])
-        asks = orderbook.get("asks", [])
+            if bids or asks:
+                max_levels = 10
 
-        if not bids and not asks:
-            return None
+                bid_vol = 0.0
+                for level in bids[:max_levels]:
+                    try:
+                        bid_vol += float(level.get("size", level[1]) if isinstance(level, dict) else level[1])
+                    except (IndexError, ValueError, TypeError):
+                        continue
 
-        # Sum up volume on each side (top N levels for relevance)
-        max_levels = 10
+                ask_vol = 0.0
+                for level in asks[:max_levels]:
+                    try:
+                        ask_vol += float(level.get("size", level[1]) if isinstance(level, dict) else level[1])
+                    except (IndexError, ValueError, TypeError):
+                        continue
 
-        bid_vol = 0.0
-        for level in bids[:max_levels]:
-            try:
-                bid_vol += float(level.get("size", level[1]) if isinstance(level, dict) else level[1])
-            except (IndexError, ValueError, TypeError):
-                continue
+                if bid_vol > 0 or ask_vol > 0:
+                    if ask_vol <= 0:
+                        return bid_vol, ask_vol, 10.0, "BUY"
+                    elif bid_vol <= 0:
+                        return bid_vol, ask_vol, 10.0, "SELL"
+                    elif bid_vol >= ask_vol:
+                        return bid_vol, ask_vol, bid_vol / ask_vol, "BUY"
+                    else:
+                        return bid_vol, ask_vol, ask_vol / bid_vol, "SELL"
 
-        ask_vol = 0.0
-        for level in asks[:max_levels]:
-            try:
-                ask_vol += float(level.get("size", level[1]) if isinstance(level, dict) else level[1])
-            except (IndexError, ValueError, TypeError):
-                continue
+        # Fallback: use bid/ask price asymmetry as a proxy
+        if market_data is not None and market_data.mid_price > 0:
+            bid = market_data.best_bid
+            ask = market_data.best_ask
+            mid = market_data.mid_price
+            if bid > 0 and ask > 0 and ask > bid:
+                # How close is mid to ask vs bid?
+                # If mid is closer to ask → bid pressure (buyers pushing up)
+                spread = ask - bid
+                if spread > 0.03:
+                    # Wide spread (e.g. default 50/52¢) — not enough info
+                    return None
+                bid_pull = (mid - bid) / spread  # 0.5 = centered
+                if bid_pull > 0.55:
+                    return 1.0, 1.0, 1.0 + (bid_pull - 0.5) * 8, "BUY"
+                elif bid_pull < 0.45:
+                    return 1.0, 1.0, 1.0 + (0.5 - bid_pull) * 8, "SELL"
 
-        if bid_vol <= 0 and ask_vol <= 0:
-            return None
-
-        # Prevent division by zero
-        if ask_vol <= 0:
-            ratio = 10.0
-            direction = "BUY"
-        elif bid_vol <= 0:
-            ratio = 10.0
-            direction = "SELL"
-        elif bid_vol >= ask_vol:
-            ratio = bid_vol / ask_vol
-            direction = "BUY"
-        else:
-            ratio = ask_vol / bid_vol
-            direction = "SELL"
-
-        return bid_vol, ask_vol, ratio, direction
+        return None
 
     def _size_bet(self, estimated_prob: float, market_prob: float) -> float:
         """Size using Kelly with fallback."""

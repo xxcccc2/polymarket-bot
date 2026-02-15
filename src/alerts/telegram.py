@@ -226,6 +226,18 @@ class TelegramAlerter:
                 self._send_next()
             time.sleep(0.5)
 
+    @staticmethod
+    def _escape_markdown(text: str) -> str:
+        """Escape characters that break Telegram MarkdownV1 outside bold/italic."""
+        # Bold (*...*) markers are intentional — leave those alone.
+        # But underscores in words like cross_asset break the parser.
+        # Replace _ with \_ ONLY outside *...* blocks.
+        parts = text.split("*")
+        for i in range(len(parts)):
+            if i % 2 == 0:  # outside bold markers
+                parts[i] = parts[i].replace("_", "\\_")
+        return "*".join(parts)
+
     def _send_next(self) -> None:
         """Send the next message in the queue."""
         with self._lock:
@@ -238,12 +250,14 @@ class TelegramAlerter:
         if elapsed < self.MIN_SEND_INTERVAL:
             time.sleep(self.MIN_SEND_INTERVAL - elapsed)
 
+        safe_text = self._escape_markdown(text)
+
         try:
             resp = requests.post(
                 self._api_url,
                 json={
                     "chat_id": self.chat_id,
-                    "text": text,
+                    "text": safe_text,
                     "parse_mode": "Markdown",
                     "disable_web_page_preview": True,
                 },
@@ -252,9 +266,7 @@ class TelegramAlerter:
             self._last_send = time.time()
 
             if resp.status_code != 200:
-                # Don't spam console on Telegram failures
-                pass
+                cprint(f"  📱 Telegram send failed ({resp.status_code}): {resp.text[:120]}", "yellow")
 
-        except Exception:
-            # Telegram is best-effort — never crash the bot
-            pass
+        except Exception as e:
+            cprint(f"  📱 Telegram error: {e}", "yellow")

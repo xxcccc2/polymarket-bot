@@ -331,7 +331,8 @@ class RiskManager:
         self,
         token_id: str,
         size_usd: float,
-        price: float
+        price: float,
+        strategy: str = "",
     ) -> tuple[bool, str]:
         """
         Check if a new position can be opened.
@@ -340,6 +341,7 @@ class RiskManager:
             token_id: Token to trade
             size_usd: Position size in USD
             price: Entry price
+            strategy: Strategy name (used for exemptions)
             
         Returns:
             (allowed: bool, reason: str)
@@ -349,10 +351,11 @@ class RiskManager:
         if not can:
             return False, reason
         
-        # Check price range
+        # Check price range (stink_bid exempt from floor — 1¢ bids are by design)
         price_cents = price * 100
-        if price_cents < MIN_PRICE_CENTS or price_cents > MAX_PRICE_CENTS:
-            return False, f"Price {price_cents:.0f}¢ outside safe range ({MIN_PRICE_CENTS}-{MAX_PRICE_CENTS}¢)"
+        effective_min = 0.5 if strategy == "stink_bid" else MIN_PRICE_CENTS
+        if price_cents < effective_min or price_cents > MAX_PRICE_CENTS:
+            return False, f"Price {price_cents:.0f}¢ outside safe range ({effective_min}-{MAX_PRICE_CENTS}¢)"
         
         # Compute dynamic limits based on bankroll
         max_pos = self._get_max_position()

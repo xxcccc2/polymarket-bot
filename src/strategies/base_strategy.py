@@ -89,6 +89,7 @@ class MarketData:
     last_price: float
     timestamp: datetime = field(default_factory=datetime.now)
     orderbook: Optional[Dict] = None  # Full orderbook if available
+    recent_trades: Optional[List[Dict]] = None  # Recent trades for VPIN
     
     @property
     def spread_cents(self) -> float:

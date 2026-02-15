@@ -336,6 +336,8 @@ class PolymarketBot:
         last_balance_check = 0
         last_market_refresh = 0
         fill_check_interval = 10  # Check for fills every 10 seconds
+        self._recent_trades_cache: List[Dict] = []  # shared with VPIN
+        self._first_scan_done = False
         
         while self.is_running:
             try:
@@ -343,23 +345,39 @@ class PolymarketBot:
                 
                 # Check if it's time to scan
                 if now - last_scan >= SCAN_INTERVAL_SECONDS:
+                    t0 = time.time()
                     self._scan_and_trade()
-                    last_scan = now
+                    dt = time.time() - t0
+                    if dt > 5:
+                        cprint(f"   ⏱️  scan_and_trade took {dt:.1f}s (slow!)", "yellow")
+                    last_scan = time.time()  # use actual time, not stale `now`
                 
                 # Check for fills periodically
-                if now - last_fill_check >= fill_check_interval:
+                if time.time() - last_fill_check >= fill_check_interval:
+                    t0 = time.time()
                     self._check_for_fills()
-                    last_fill_check = now
+                    dt = time.time() - t0
+                    if dt > 5:
+                        cprint(f"   ⏱️  fill_check took {dt:.1f}s (slow!)", "yellow")
+                    last_fill_check = time.time()
 
                 # Refresh balance periodically
-                if now - last_balance_check >= BALANCE_REFRESH_SECONDS:
+                if time.time() - last_balance_check >= BALANCE_REFRESH_SECONDS:
+                    t0 = time.time()
                     self._refresh_balance()
-                    last_balance_check = now
+                    dt = time.time() - t0
+                    if dt > 5:
+                        cprint(f"   ⏱️  balance_refresh took {dt:.1f}s (slow!)", "yellow")
+                    last_balance_check = time.time()
 
                 # Refresh market universe periodically
-                if now - last_market_refresh >= MARKET_REFRESH_SECONDS:
+                if time.time() - last_market_refresh >= MARKET_REFRESH_SECONDS:
+                    t0 = time.time()
                     self._fetch_markets(is_refresh=True)
-                    last_market_refresh = now
+                    dt = time.time() - t0
+                    if dt > 5:
+                        cprint(f"   ⏱️  market_refresh took {dt:.1f}s (slow!)", "yellow")
+                    last_market_refresh = time.time()
                 
                 # Small sleep to prevent CPU spinning
                 time.sleep(0.1)
@@ -389,6 +407,26 @@ class PolymarketBot:
             return
         
         cprint(f"\n📊 Analyzed {len(market_data_list)} tokens @ {datetime.now().strftime('%H:%M:%S')}", "cyan")
+        
+        # Log Binance state every scan (critical for diagnosing BTC strategy silence)
+        if hasattr(self, 'binance_feed') and self.binance_feed:
+            bs = self.binance_feed.get_state()
+            if bs.connected and bs.last_price > 0:
+                cprint(
+                    f"   📡 BTC ${bs.last_price:,.0f} | "
+                    f"10s={bs.price_change_pct_10s:+.4f}% "
+                    f"30s={bs.price_change_pct_30s:+.4f}% "
+                    f"60s={bs.price_change_pct_60s:+.4f}% | "
+                    f"vol={bs.volatility_5m:.2f}σ press={bs.bid_pressure:.2f}",
+                    "dark_grey",
+                )
+            elif not bs.connected:
+                cprint("   📡 Binance: NOT CONNECTED", "red")
+        
+        # First-scan diagnostic: show market matching stats
+        if not self._first_scan_done:
+            self._first_scan_done = True
+            self._log_market_diagnostics(market_data_list)
         
         # Show adaptive risk state
         if self.risk_manager.adaptive_enabled:
@@ -424,7 +462,8 @@ class PolymarketBot:
                     can_open, reason = self.risk_manager.can_open_position(
                         signal.token_id,
                         adaptive_size,
-                        signal.price
+                        signal.price,
+                        strategy=strategy.name,
                     )
                     
                     if not can_open:
@@ -466,9 +505,22 @@ class PolymarketBot:
                 best_bid = float(market.get("bestBid", 0) or 0)
                 best_ask = float(market.get("bestAsk", 1) or 1)
                 
-                # Skip if no valid prices
+                # Check if this is a BTC short-term market (from events)
+                q_lower = market.get("question", "").lower()
+                slug_lower = market.get("slug", "").lower()
+                mtext = f"{q_lower} {slug_lower}"
+                is_btc_st = (
+                    any(kw in mtext for kw in ["bitcoin", "btc"])
+                    and any(kw in mtext for kw in BTC_5MIN_KEYWORDS)
+                )
+                
+                # Skip if no valid prices (exempt BTC short-term — use 50/50 default)
                 if best_bid <= 0 or best_ask <= 0 or best_ask >= 1:
-                    continue
+                    if is_btc_st:
+                        best_bid = 0.50
+                        best_ask = 0.52
+                    else:
+                        continue
                 
                 mid = (best_bid + best_ask) / 2
                 spread = best_ask - best_bid
@@ -496,65 +548,176 @@ class PolymarketBot:
                     except:
                         continue
                 
-                # First token is YES, second is NO
-                yes_token_id = clob_tokens[0] if len(clob_tokens) > 0 else None
-                no_token_id = clob_tokens[1] if len(clob_tokens) > 1 else None
+                # Parse outcomes — e.g. ["Up","Down"], ["Yes","No"]
+                raw_outcomes = market.get("outcomes", [])
+                if isinstance(raw_outcomes, str):
+                    import json as _json
+                    try:
+                        raw_outcomes = _json.loads(raw_outcomes)
+                    except Exception:
+                        raw_outcomes = ["Yes", "No"]
+                if not raw_outcomes:
+                    raw_outcomes = ["Yes", "No"]
                 
-                if not yes_token_id:
-                    continue
-                
-                # Create market data for YES outcome
-                data = MarketData(
-                    token_id=yes_token_id,  # Use actual token ID for CLOB API
-                    condition_id=condition_id,
-                    market_slug=market.get("slug", ""),
-                    question=market.get("question", ""),
-                    outcome="YES",  # Primary outcome
-                    best_bid=best_bid,
-                    best_ask=best_ask,
-                    mid_price=mid,
-                    spread=spread,
-                    volume_24h=volume,
-                    liquidity=float(market.get("liquidityClob", 0) or 0),
-                    last_price=float(market.get("lastTradePrice", mid) or mid)
-                )
-                
-                data_list.append(data)
+                # Build one MarketData per outcome token
+                for idx, token_id in enumerate(clob_tokens):
+                    if not token_id:
+                        continue
+                    outcome_label = raw_outcomes[idx] if idx < len(raw_outcomes) else "Yes"
+                    
+                    # For the first token, use API bid/ask directly
+                    # For the second token, invert (complement pricing)
+                    if idx == 0:
+                        t_bid, t_ask = best_bid, best_ask
+                    else:
+                        t_bid = round(max(0.01, 1.0 - best_ask), 4)
+                        t_ask = round(min(0.99, 1.0 - best_bid), 4)
+                    
+                    t_mid = (t_bid + t_ask) / 2
+                    t_spread = t_ask - t_bid
+                    
+                    # Get cached recent trades for this token (for VPIN)
+                    token_trades = [
+                        t for t in getattr(self, '_recent_trades_cache', [])
+                        if (t.get("asset_id") or t.get("token_id")) == token_id
+                    ]
+
+                    data = MarketData(
+                        token_id=token_id,
+                        condition_id=condition_id,
+                        market_slug=market.get("slug", ""),
+                        question=market.get("question", ""),
+                        outcome=outcome_label,
+                        best_bid=t_bid,
+                        best_ask=t_ask,
+                        mid_price=t_mid,
+                        spread=t_spread,
+                        volume_24h=volume,
+                        liquidity=float(market.get("liquidityClob", 0) or 0),
+                        last_price=float(market.get("lastTradePrice", t_mid) or t_mid),
+                        recent_trades=token_trades if token_trades else None,
+                    )
+                    
+                    data_list.append(data)
                     
             except Exception as e:
                 continue
         
         return data_list
-    
+
+    def _log_market_diagnostics(self, market_data_list: List[MarketData]) -> None:
+        """Log how many markets match each strategy's filters (first scan only)."""
+        btc_count = 0
+        btc_5min_count = 0
+        crypto_count = 0
+        with_orderbook = 0
+        with_trades = 0
+        sample_all: List[str] = []  # first few market questions for debugging
+
+        for md in market_data_list:
+            q = md.question.lower()
+            slug = md.market_slug.lower()
+            text = f"{q} {slug}"  # search both fields
+            is_btc = any(kw in text for kw in ["bitcoin", "btc"])
+            is_5min = any(kw in text for kw in BTC_5MIN_KEYWORDS)
+            is_crypto = any(kw in text for kw in CRYPTO_MARKET_KEYWORDS)
+
+            if is_btc:
+                btc_count += 1
+            if is_btc and is_5min:
+                btc_5min_count += 1
+            if is_crypto:
+                crypto_count += 1
+            if md.orderbook:
+                with_orderbook += 1
+            if md.recent_trades:
+                with_trades += 1
+            if len(sample_all) < 5:
+                sample_all.append(f"Q={q[:60]} | slug={slug[:40]}")
+
+        cprint(f"\n   🔍 Market Diagnostics (first scan):", "cyan", attrs=["bold"])
+        cprint(f"      Total tokens: {len(market_data_list)}", "white")
+        cprint(f"      Crypto markets: {crypto_count}", "white")
+        cprint(f"      BTC markets: {btc_count}", "white")
+        cprint(f"      BTC short-term markets: {btc_5min_count}", "white")
+        cprint(f"      With orderbook data: {with_orderbook}", "white")
+        cprint(f"      With recent trades: {with_trades}", "white")
+
+        if btc_5min_count == 0:
+            cprint(f"      ⚠️  No BTC short-term markets matched!", "yellow")
+            cprint(f"      Sample markets (first 5):", "yellow")
+            for s in sample_all:
+                cprint(f"        {s}", "yellow")
+
     def _fetch_markets(self, is_refresh: bool = False):
         """Fetch and filter available markets."""
         try:
             result = self.client.get_markets()
             
-            if "error" in result:
+            if isinstance(result, dict) and "error" in result:
                 cprint(f"❌ Failed to fetch markets: {result['error']}", "red")
                 return
             
             markets = result if isinstance(result, list) else result.get("data", [])
             
+            # Also fetch events (5-min BTC markets live here, not in /markets)
+            if ENABLE_BTC_5MIN:
+                events = self.client.get_events(limit=100)
+                event_market_count = 0
+                for event in events:
+                    slug = event.get("slug", "").lower()
+                    title = event.get("title", "").lower()
+                    text = f"{title} {slug}"
+                    # Only extract crypto up/down event sub-markets
+                    is_crypto_event = any(
+                        kw in text for kw in ["bitcoin", "btc", "ethereum", "eth",
+                                              "solana", "sol", "xrp", "up or down"]
+                    )
+                    if not is_crypto_event:
+                        continue
+                    for sub_market in event.get("markets", []):
+                        if sub_market.get("closed"):
+                            continue
+                        if not sub_market.get("acceptingOrders"):
+                            continue
+                        markets.append(sub_market)
+                        event_market_count += 1
+                if event_market_count > 0:
+                    cprint(f"📡 Found {event_market_count} crypto event markets from /events", "cyan")
+            
             # Filter markets based on settings
             filtered = []
+            seen_ids = set()
             for market in markets:
                 question = market.get("question", "").lower()
+                slug = market.get("slug", "").lower()
+                text = f"{question} {slug}"
+                
+                # Deduplicate by conditionId
+                cid = market.get("conditionId") or market.get("condition_id") or market.get("id")
+                if cid in seen_ids:
+                    continue
+                seen_ids.add(cid)
                 
                 # Check if crypto-related (if filter enabled)
                 if ONLY_CRYPTO_MARKETS:
-                    is_crypto = any(kw in question for kw in CRYPTO_MARKET_KEYWORDS)
+                    is_crypto = any(kw in text for kw in CRYPTO_MARKET_KEYWORDS)
                     if not is_crypto:
                         continue
                 
-                # Check volume
-                volume = float(market.get("volume24hr", 0))
-                if volume < MIN_VOLUME_USD:
-                    continue
-                
                 # Check not closed
                 if market.get("closed"):
+                    continue
+                
+                # BTC short-term markets get a lower volume threshold
+                is_btc_shortterm = (
+                    any(kw in text for kw in ["bitcoin", "btc"])
+                    and any(kw in text for kw in BTC_5MIN_KEYWORDS)
+                )
+                
+                volume = float(market.get("volume24hr", 0) or 0)
+                min_vol = 0 if is_btc_shortterm else MIN_VOLUME_USD
+                if volume < min_vol:
                     continue
                 
                 filtered.append(market)
@@ -655,6 +818,9 @@ class PolymarketBot:
             
             if not trades:
                 return
+
+            # Cache trades for VPIN strategy
+            self._recent_trades_cache = trades
             
             # Track which trades we've already processed (by trade ID)
             if not hasattr(self, '_processed_trades'):
@@ -709,13 +875,10 @@ class PolymarketBot:
                         size=size,
                         market=order.market_slug,
                     )
-                else:
-                    # Still log untracked fills
-                    cprint(f"💰 FILL [EXTERNAL]: {side} {size:.2f} @ ${price:.3f}", "cyan")
+                # External trades (other users) — don't log, just cache for VPIN
                     
         except Exception as e:
-            # Don't spam errors - fill checking is optional
-            pass
+            cprint(f"   ⚠️  Fill check error: {e}", "yellow")
     
     def _on_order_fill(self, order, fill_data: Dict):
         """Handle order fills."""

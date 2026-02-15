@@ -98,18 +98,29 @@ class StinkBidStrategy(BaseStrategy):
         Calculate orderbook depth as ratio of 24h volume.
         
         Lower ratio = thinner book = better opportunity.
+        Uses full orderbook if available, otherwise falls back to
+        liquidity/volume ratio from Gamma API data.
         """
-        if not market_data.orderbook or market_data.volume_24h == 0:
-            return 1.0  # Assume thick if no data
-        
-        # Sum up bid-side liquidity
-        bids = market_data.orderbook.get("bids", [])
-        total_bid_depth = sum(
-            float(b.get("size", 0)) * float(b.get("price", 0))
-            for b in bids
-        )
-        
-        return total_bid_depth / market_data.volume_24h
+        if market_data.volume_24h == 0:
+            return 1.0
+
+        if market_data.orderbook:
+            # Full orderbook available — use bid-side depth
+            bids = market_data.orderbook.get("bids", [])
+            total_bid_depth = sum(
+                float(b.get("size", 0)) * float(b.get("price", 0))
+                for b in bids
+            )
+            return total_bid_depth / market_data.volume_24h
+
+        # Fallback: use liquidity field from Gamma API as proxy
+        if market_data.liquidity > 0:
+            return market_data.liquidity / market_data.volume_24h
+
+        # No data at all — use spread as rough proxy (wide spread = thin book)
+        if market_data.spread > 0.05:  # >5¢ spread suggests thin
+            return 0.01  # Very thin
+        return 0.5  # Moderate assumption
     
     def _is_thin_orderbook(self, market_data: MarketData) -> tuple[bool, float]:
         """

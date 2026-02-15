@@ -111,19 +111,29 @@ CRYPTO_MARKET_KEYWORDS = [
 # Enable 5-min BTC market strategies
 ENABLE_BTC_5MIN = os.getenv("ENABLE_BTC_5MIN", "true").lower() == "true"
 
-# Keywords to identify 5-min BTC markets on Polymarket
+# Keywords to identify short-term BTC markets on Polymarket
+# Actual market titles: "Bitcoin Up or Down - 5 min", "- 15 min", "- 1 hour"
 BTC_5MIN_KEYWORDS = [
-    "5-minute", "5 minute", "5min", "5-min",
-    "next 5", "in 5 minutes",
+    # Exact Polymarket phrasing
+    "up or down - 5 min",
+    "up or down - 15 min",
+    "up or down - 1 hour",
+    "up or down - 1h",
+    # Fallback patterns
+    "5 min", "5-min", "5min", "5-minute", "5 minute",
+    "15 min", "15-min", "15min",
+    "1 hour", "1h",
+    "up or down",
 ]
 
 # Cross-asset latency thresholds
 # Minimum BTC price move (%) on Binance to trigger a signal
-BTC_MIN_MOVE_PCT = float(os.getenv("BTC_MIN_MOVE_PCT", "0.15"))
+# 0.05% ≈ $50 on $100k BTC — fires often enough for 5-min markets
+BTC_MIN_MOVE_PCT = float(os.getenv("BTC_MIN_MOVE_PCT", "0.05"))
 # Reaction window — seconds after Binance move to trade Polymarket
 BTC_REACTION_WINDOW_SECONDS = float(os.getenv("BTC_REACTION_WINDOW_SECONDS", "10"))
 # Minimum confidence to trade cross-asset signal
-BTC_MIN_CONFIDENCE = float(os.getenv("BTC_MIN_CONFIDENCE", "0.55"))
+BTC_MIN_CONFIDENCE = float(os.getenv("BTC_MIN_CONFIDENCE", "0.52"))
 
 # Terminal convergence — seconds before expiry to start trading
 TERMINAL_CONVERGENCE_WINDOW_SECONDS = int(os.getenv("TERMINAL_CONVERGENCE_WINDOW_SECONDS", "60"))

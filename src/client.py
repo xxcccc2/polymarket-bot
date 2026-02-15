@@ -7,9 +7,23 @@ rate limiting, and convenience methods.
 
 import time
 import random
+import concurrent.futures
 from typing import Dict, List, Optional, Any
 from datetime import datetime
 from .logging_utils import cprint
+
+# Thread pool for bounded HTTP calls (prevents main loop hanging)
+_TIMEOUT_POOL = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="api")
+
+def _call_with_timeout(fn, timeout_s: float = 15, default=None):
+    """Run *fn* in a thread and return default if it exceeds *timeout_s*."""
+    try:
+        future = _TIMEOUT_POOL.submit(fn)
+        return future.result(timeout=timeout_s)
+    except concurrent.futures.TimeoutError:
+        return default
+    except Exception:
+        return default
 
 from .config import (
     CLOB_HOST,
@@ -132,15 +146,16 @@ class PolymarketClient:
         if last_error:
             raise last_error
     
-    def get_markets(self, next_cursor: str = "") -> Dict:
+    def get_markets(self, next_cursor: str = "", tag: str = "") -> Dict:
         """
-        Fetch available markets from Gamma API.
+        Fetch available markets from Gamma API with automatic pagination.
         
         Args:
-            next_cursor: Pagination cursor
+            next_cursor: Pagination cursor (used internally)
+            tag: Optional tag filter (e.g. "crypto")
             
         Returns:
-            Dict with markets data
+            List of market dicts (paginated automatically)
         """
         if not self.is_connected:
             return {"error": "Not connected"}
@@ -149,21 +164,77 @@ class PolymarketClient:
             import requests
             
             url = f"{GAMMA_HOST}/markets"
-            params = {"closed": "false", "limit": 100}
-            if next_cursor:
-                params["next_cursor"] = next_cursor
+            all_markets: list = []
+            cursor = next_cursor
+            max_pages = 10  # safety cap
+
+            for _ in range(max_pages):
+                params = {"closed": "false", "limit": 100}
+                if cursor:
+                    params["next_cursor"] = cursor
+                if tag:
+                    params["tag"] = tag
+
+                def _request(p=dict(params)):
+                    response = requests.get(url, params=p, timeout=30)
+                    response.raise_for_status()
+                    return response.json()
+
+                result = self._retry_call(_request, "Fetch markets")
+
+                if isinstance(result, list):
+                    all_markets.extend(result)
+                    break  # no pagination info — single page
+                elif isinstance(result, dict):
+                    data = result.get("data", result.get("markets", []))
+                    if isinstance(data, list):
+                        all_markets.extend(data)
+                    cursor = result.get("next_cursor", "")
+                    if not cursor:
+                        break
+                else:
+                    break
+
+            return all_markets
+            
+        except Exception as e:
+            cprint(f"❌ Failed to fetch markets: {e}", "red")
+            return {"error": str(e)}
+    
+    def get_events(self, limit: int = 50) -> List[Dict]:
+        """
+        Fetch active events from Gamma API (includes 5-min crypto markets).
+        
+        Returns:
+            List of event dicts, each containing a 'markets' sub-list.
+        """
+        if not self.is_connected:
+            return []
+        
+        try:
+            import requests
+            
+            url = f"{GAMMA_HOST}/events"
+            params = {
+                "closed": "false",
+                "active": "true",
+                "limit": limit,
+                "order": "startDate",
+                "ascending": "false",
+            }
 
             def _request():
                 response = requests.get(url, params=params, timeout=30)
                 response.raise_for_status()
                 return response.json()
 
-            return self._retry_call(_request, "Fetch markets")
+            result = self._retry_call(_request, "Fetch events")
+            return result if isinstance(result, list) else []
             
         except Exception as e:
-            cprint(f"❌ Failed to fetch markets: {e}", "red")
-            return {"error": str(e)}
-    
+            cprint(f"⚠️ Failed to fetch events: {e}", "yellow")
+            return []
+
     def get_market(self, condition_id: str) -> Optional[Dict]:
         """
         Get details for a specific market.
@@ -396,14 +467,18 @@ class PolymarketClient:
             return []
     
     def get_trades(self, limit: int = 100) -> List[Dict]:
-        """Get recent trades."""
+        """Get recent trades (bounded to 15s timeout)."""
         if not self.is_connected:
             return []
-        
+
         try:
-            trades = self._retry_call(lambda: self.client.get_trades(), "Fetch trades")
+            trades = _call_with_timeout(
+                lambda: self._retry_call(lambda: self.client.get_trades(), "Fetch trades"),
+                timeout_s=15,
+                default=[],
+            )
             return trades[:limit] if trades else []
-            
+
         except Exception as e:
             cprint(f"❌ Failed to fetch trades: {e}", "red")
             return []
@@ -457,19 +532,21 @@ class PolymarketClient:
                         return value
             return None
 
-        for method_name in ("get_balance", "get_collateral", "get_account"):
-            method = getattr(self.client, method_name, None)
-            if not method:
-                continue
-            try:
-                response = method()
-            except Exception:
-                continue
-            balance = parse_balance(response)
-            if balance is not None:
-                return balance
+        def _try_methods():
+            for method_name in ("get_balance", "get_collateral", "get_account"):
+                method = getattr(self.client, method_name, None)
+                if not method:
+                    continue
+                try:
+                    response = method()
+                except Exception:
+                    continue
+                bal = parse_balance(response)
+                if bal is not None:
+                    return bal
+            return None
 
-        return None
+        return _call_with_timeout(_try_methods, timeout_s=15, default=None)
 
 
 # Convenience function for quick client creation

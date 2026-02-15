@@ -81,11 +81,11 @@ class TerminalConvergenceStrategy(BaseStrategy):
         if not ENABLE_BTC_5MIN:
             return False
 
-        q = market_data.question.lower()
+        text = f"{market_data.question} {market_data.market_slug}".lower()
 
-        # Must be BTC + 5-min
-        is_btc = any(kw in q for kw in ["bitcoin", "btc"])
-        is_5min = any(kw in q for kw in BTC_5MIN_KEYWORDS)
+        # Must be BTC + short-term
+        is_btc = any(kw in text for kw in ["bitcoin", "btc"])
+        is_5min = any(kw in text for kw in BTC_5MIN_KEYWORDS)
         if not (is_btc and is_5min):
             return False
 
@@ -115,9 +115,14 @@ class TerminalConvergenceStrategy(BaseStrategy):
         if not binance.connected or binance.last_price <= 0:
             return signals
 
+        n_eligible = 0
+        best_prob = 0.0
+        best_edge = -999.0
+
         for data in market_data:
             if not self.should_trade_market(data):
                 continue
+            n_eligible += 1
 
             # Position limit
             current_pos = self.positions.get(data.token_id, 0)
@@ -125,17 +130,51 @@ class TerminalConvergenceStrategy(BaseStrategy):
                 continue
 
             # Parse what the market is asking and extract the strike price
-            strike_info = self._parse_strike(data.question)
+            strike_info = self._parse_strike(data.question, data.outcome)
             if not strike_info:
                 continue
 
-            strike_price, direction = strike_info
+            strike_price, direction, outcome_label = strike_info
 
             # Determine if the current BTC price makes this outcome near-certain
             btc_price = binance.last_price
-            estimated_prob = self._estimate_terminal_prob(
-                btc_price, strike_price, direction, binance.volatility_5m
-            )
+
+            if direction == "up_or_down":
+                # For "Up or Down" markets: use BTC momentum to estimate probability
+                # These resolve based on whether BTC went up or down over the window
+                move_10s = binance.price_change_pct_10s
+                move_30s = binance.price_change_pct_30s
+                move_60s = binance.price_change_pct_60s
+                pressure = binance.bid_pressure  # 0-1, >0.5 = buying
+                
+                # Require actual price movement — bid_pressure alone is too noisy
+                price_move = max(abs(move_10s), abs(move_30s), abs(move_60s))
+                if price_move < 0.02:  # need at least 0.02% real move
+                    continue
+                
+                # Primary: price movement direction; secondary: pressure as tiebreaker
+                momentum = (
+                    move_60s * 0.40
+                    + move_30s * 0.35
+                    + move_10s * 0.15
+                    + (pressure - 0.5) * 0.10
+                )
+                
+                if outcome_label.lower() == "up":
+                    estimated_prob = 0.50 + momentum * 2.5
+                else:
+                    estimated_prob = 0.50 - momentum * 2.5
+                
+                estimated_prob = max(0.05, min(0.95, estimated_prob))
+            else:
+                # Traditional strike-based markets
+                estimated_prob = self._estimate_terminal_prob(
+                    btc_price, strike_price, direction, binance.volatility_5m
+                )
+
+            best_prob = max(best_prob, estimated_prob)
+            this_edge = (estimated_prob - data.mid_price) * 100
+            best_edge = max(best_edge, this_edge)
 
             # Only interested in near-certain outcomes
             if estimated_prob < self.min_certainty:
@@ -155,9 +194,14 @@ class TerminalConvergenceStrategy(BaseStrategy):
             if net_edge_cents < 1.0:  # need at least 1¢ net edge
                 continue
 
-            # Confidence: higher when BTC is further from strike
-            btc_dist_pct = abs(btc_price - strike_price) / strike_price * 100
-            confidence = min(0.60 + btc_dist_pct * 0.10, 0.95)
+            # Confidence: higher when BTC is further from strike / probability is more extreme
+            if direction == "up_or_down":
+                # For momentum-based: confidence from how extreme the probability is
+                prob_dist = abs(estimated_prob - 0.50)
+                confidence = min(0.55 + prob_dist * 1.5, 0.95)
+            else:
+                btc_dist_pct = abs(btc_price - strike_price) / max(strike_price, 1) * 100
+                confidence = min(0.60 + btc_dist_pct * 0.10, 0.95)
 
             # Size the bet
             bet_size = self._size_bet(estimated_prob, market_price)
@@ -189,16 +233,33 @@ class TerminalConvergenceStrategy(BaseStrategy):
                     "market_prob": market_price,
                     "edge_cents": round(edge_cents, 2),
                     "net_edge_cents": round(net_edge_cents, 2),
-                    "btc_distance_pct": round(btc_dist_pct, 3),
                     "strategy": "terminal_convergence",
                 },
             )
 
             signals.append(signal)
-            self.signals_generated += 1
-            self.last_signal_time[data.token_id] = time.time()
 
-            cprint(f"  🏁 {signal}", "green")
+        # Keep only the top 3 signals by edge (avoid order flood)
+        max_signals_per_cycle = 3
+        if len(signals) > max_signals_per_cycle:
+            signals.sort(key=lambda s: s.metadata.get("edge_cents", 0), reverse=True)
+            signals = signals[:max_signals_per_cycle]
+
+        # Set cooldowns only for signals we actually emit
+        for sig in signals:
+            self.signals_generated += 1
+            self.last_signal_time[sig.token_id] = time.time()
+            cprint(f"  🏁 {sig}", "green")
+
+        # Diagnostic summary
+        if not signals and n_eligible > 0:
+            edge_str = f"{best_edge:+.1f}¢" if best_edge > -999 else "n/a"
+            cprint(
+                f"  📊 terminal_conv funnel: {n_eligible} eligible | "
+                f"best_prob={best_prob:.3f} (need ≥{self.min_certainty}) | "
+                f"best_edge={edge_str} (need ≥{self.min_edge_cents}¢)",
+                "dark_grey",
+            )
 
         return signals
 
@@ -244,20 +305,26 @@ class TerminalConvergenceStrategy(BaseStrategy):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _parse_strike(question: str):
+    def _parse_strike(question: str, outcome: str = "Yes"):
         """
         Parse a 5-min BTC market question to extract the strike price and direction.
 
-        Examples:
-            "Will Bitcoin go above $97,500 in the next 5 minutes?" → (97500, "above")
-            "Will BTC be below $96,000 in 5 minutes?" → (96000, "below")
+        Handles two formats:
+        1. "Will Bitcoin go above $97,500?" → (97500, "above")
+        2. "Bitcoin Up or Down - Feb 15, 11:05AM-11:10AM ET" → (0, "up_or_down")
+
+        For format 2, strike=0 is a sentinel; the caller uses Binance VWAP instead.
 
         Returns:
-            (strike_price, direction) or None if unparseable.
+            (strike_price, direction, outcome) or None if unparseable.
         """
         import re
 
         q = question.lower()
+
+        # Handle "Bitcoin Up or Down" format — no explicit strike
+        if "up or down" in q:
+            return 0, "up_or_down", outcome
 
         # Look for dollar amounts with optional commas
         price_pattern = r'\$[\d,]+(?:\.\d+)?'
@@ -279,10 +346,9 @@ class TerminalConvergenceStrategy(BaseStrategy):
         elif any(kw in q for kw in ["below", "under", "lower than", "go down", "fall below", "drop below"]):
             direction = "below"
         else:
-            # Default heuristic: if question asks "will BTC be X" → above
             direction = "above"
 
-        return strike_price, direction
+        return strike_price, direction, outcome
 
     @staticmethod
     def _estimate_terminal_prob(
