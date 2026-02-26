@@ -251,15 +251,19 @@ class TerminalConvergenceStrategy(BaseStrategy):
             self.last_signal_time[sig.token_id] = time.time()
             cprint(f"  🏁 {sig}", "green")
 
-        # Diagnostic summary
+        # Diagnostic summary — throttled to avoid flooding the Activity Log
         if not signals and n_eligible > 0:
-            edge_str = f"{best_edge:+.1f}¢" if best_edge > -999 else "n/a"
-            cprint(
-                f"  📊 terminal_conv funnel: {n_eligible} eligible | "
-                f"best_prob={best_prob:.3f} (need ≥{self.min_certainty}) | "
-                f"best_edge={edge_str} (need ≥{self.min_edge_cents}¢)",
-                "dark_grey",
-            )
+            now = time.time()
+            last_diag = getattr(self, '_last_diag_log', 0)
+            if now - last_diag >= 30:  # log at most every 30s
+                self._last_diag_log = now
+                edge_str = f"{best_edge:+.1f}¢" if best_edge > -999 else "n/a"
+                cprint(
+                    f"  📊 terminal_conv funnel: {n_eligible} eligible | "
+                    f"best_prob={best_prob:.3f} (need ≥{self.min_certainty}) | "
+                    f"best_edge={edge_str} (need ≥{self.min_edge_cents}¢)",
+                    "dark_grey",
+                )
 
         return signals
 
@@ -278,6 +282,8 @@ class TerminalConvergenceStrategy(BaseStrategy):
                     price=signal.price,
                     size=signal.size,
                     order_type="GTC",
+                    market_slug=signal.market_slug,
+                    metadata={"strategy": self.name, **signal.metadata},
                 )
 
                 if order_result.get("success"):

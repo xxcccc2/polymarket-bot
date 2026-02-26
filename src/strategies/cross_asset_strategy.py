@@ -251,15 +251,19 @@ class CrossAssetStrategy(BaseStrategy):
             self.last_signal_time[sig.token_id] = time.time()
             cprint(f"  🎯 {sig}", "green")
 
-        # Diagnostic summary when BTC moved but no signals
+        # Diagnostic summary when BTC moved but no signals — throttled
         if not signals and n_eligible > 0:
-            edge_str = f"{best_edge*100:+.1f}¢" if best_edge > -999 else "n/a"
-            cprint(
-                f"  📊 cross_asset funnel: {n_eligible} eligible → "
-                f"{n_parsed} parsed → {n_direction_match} dir_match → "
-                f"{n_edge_ok} edge_ok (best={edge_str})",
-                "dark_grey",
-            )
+            now = time.time()
+            last_diag = getattr(self, '_last_diag_log', 0)
+            if now - last_diag >= 30:  # log at most every 30s
+                self._last_diag_log = now
+                edge_str = f"{best_edge*100:+.1f}¢" if best_edge > -999 else "n/a"
+                cprint(
+                    f"  📊 cross_asset funnel: {n_eligible} eligible → "
+                    f"{n_parsed} parsed → {n_direction_match} dir_match → "
+                    f"{n_edge_ok} edge_ok (best={edge_str})",
+                    "dark_grey",
+                )
 
         return signals
 
@@ -278,6 +282,8 @@ class CrossAssetStrategy(BaseStrategy):
                     price=signal.price,
                     size=signal.size,
                     order_type="GTC",
+                    market_slug=signal.market_slug,
+                    metadata={"strategy": self.name, **signal.metadata},
                 )
 
                 if order_result.get("success"):

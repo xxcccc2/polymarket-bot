@@ -124,7 +124,14 @@ Passive asymmetric bets — $1 bids for potential 100x:
 - Fills on panic sells and fat-finger trades
 - Perfect for small accounts — high optionality, low capital
 
-#### 5. Late Money ✅ `late_money`
+#### 5. Wallet Copy ✅ `wallet_copy`
+Copy trades from top Polymarket traders:
+- Tracks wallets from leaderboard (by PnL) or manual list
+- Polls their trades via Data API, copies new BUYs with configurable size
+- Filters: crypto-only, min trade size, max copy delay
+- Run: `python -m src.bot --strategy wallet_copy`
+
+#### 6. Late Money ✅ `late_money`
 Follow informed traders near expiration:
 - Tracks price velocity in final hours
 - 40% of volume occurs in last minute (more informed)
@@ -158,9 +165,6 @@ Exploit logical pricing violations across related markets:
 
 #### 9. Spread Strategy `spread`
 Micro-spread farming. Disabled: adverse selection eats small accounts alive.
-
-#### 10. Arbitrage Strategy `arbitrage`
-YES + NO < $1 arbs. Disabled: near-extinct on Polymarket.
 
 #### 11. Favorite-Longshot Bias `favorite_longshot`
 Buy favorites at 85-95¢. Disabled: locks up too much capital.

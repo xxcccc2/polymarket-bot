@@ -231,6 +231,8 @@ class OrderbookImbalanceStrategy(BaseStrategy):
                     price=signal.price,
                     size=signal.size,
                     order_type="GTC",
+                    market_slug=signal.market_slug,
+                    metadata={"strategy": self.name, **signal.metadata},
                 )
 
                 if order_result.get("success"):

@@ -182,7 +182,7 @@ TELEGRAM_ALERTS_ENABLED = os.getenv("TELEGRAM_ALERTS_ENABLED", "true").lower() =
 # Default: disable money-losing / capital-inefficient strategies for small bankrolls
 DISABLED_STRATEGIES = [
     s.strip()
-    for s in os.getenv("DISABLED_STRATEGIES", "spread,arbitrage,favorite_longshot,cross_platform_arbitrage").split(",")
+    for s in os.getenv("DISABLED_STRATEGIES", "spread,favorite_longshot,cross_platform_arbitrage").split(",")
     if s.strip()
 ]
 
@@ -212,6 +212,26 @@ SENTIMENT_COOLDOWN = int(os.getenv("SENTIMENT_COOLDOWN", "300"))
 # =============================================================================
 COMBO_MIN_EDGE_CENTS = int(os.getenv("COMBO_MIN_EDGE_CENTS", "3"))
 COMBO_COOLDOWN = int(os.getenv("COMBO_COOLDOWN", "300"))
+
+# =============================================================================
+# WALLET COPY (Track best traders)
+# =============================================================================
+# Comma-separated proxy wallet addresses to copy (manual list)
+TRACKED_WALLETS = [
+    w.strip() for w in os.getenv("TRACKED_WALLETS", "").split(",") if w.strip()
+]
+# Auto-fetch top N traders from leaderboard (PNL-ranked)
+WALLET_COPY_USE_LEADERBOARD = os.getenv("WALLET_COPY_USE_LEADERBOARD", "true").lower() == "true"
+WALLET_COPY_LEADERBOARD_TOP_N = int(os.getenv("WALLET_COPY_LEADERBOARD_TOP_N", "5"))
+WALLET_COPY_LEADERBOARD_CATEGORY = os.getenv("WALLET_COPY_LEADERBOARD_CATEGORY", "CRYPTO")
+WALLET_COPY_LEADERBOARD_PERIOD = os.getenv("WALLET_COPY_LEADERBOARD_PERIOD", "MONTH")
+# Copy parameters
+WALLET_COPY_SIZE_USD = float(os.getenv("WALLET_COPY_SIZE_USD", str(ORDER_SIZE_USD)))
+WALLET_COPY_SIZE_MULTIPLIER = float(os.getenv("WALLET_COPY_SIZE_MULTIPLIER", "1.0"))
+WALLET_COPY_MAX_DELAY_SECONDS = int(os.getenv("WALLET_COPY_MAX_DELAY_SECONDS", "120"))
+WALLET_COPY_MIN_TRADE_USD = float(os.getenv("WALLET_COPY_MIN_TRADE_USD", "10"))
+WALLET_COPY_CRYPTO_ONLY = os.getenv("WALLET_COPY_CRYPTO_ONLY", "true").lower() == "true"
+WALLET_COPY_COOLDOWN_SECONDS = int(os.getenv("WALLET_COPY_COOLDOWN_SECONDS", "60"))
 
 # =============================================================================
 # BOT BEHAVIOR

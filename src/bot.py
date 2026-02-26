@@ -16,7 +16,11 @@ import threading
 from typing import Dict, List, Optional, Type
 from datetime import datetime
 
-from .logging_utils import cprint
+from .logging_utils import cprint, set_dashboard_mode
+from .dashboard import (
+    Dashboard, DashboardState, BinanceSnapshot,
+    StrategyRow, PortfolioSnapshot, log as dash_log,
+)
 
 from .config import (
     SCAN_INTERVAL_SECONDS,
@@ -120,8 +124,9 @@ class PolymarketBot:
             self.binance_feed = BinanceFeed()
             cprint("   ₿ Binance feed initialized", "cyan")
         
-        # Strategy config — inject binance_feed into strategies that need it
+        # Strategy config — inject shared resources into strategies
         merged_config = dict(strategy_config or {})
+        merged_config["client"] = self.client
         if self.binance_feed:
             merged_config["binance_feed"] = self.binance_feed
         
@@ -132,7 +137,7 @@ class PolymarketBot:
         # BTC 5-min strategies that need Binance feed
         _BTC_5MIN_STRATEGIES = ["cross_asset", "terminal_convergence", "orderbook_imbalance"]
         # Phase 5 advanced strategies (work on all markets)
-        _ADVANCED_STRATEGIES = ["vpin", "sentiment", "combinatorial_arb"]
+        _ADVANCED_STRATEGIES = ["vpin", "sentiment", "combinatorial_arb", "wallet_copy"]
         # All original strategies
         _CLASSIC_STRATEGIES = ["spread", "arbitrage", "stink_bid", "favorite_longshot", "late_money"]
         
@@ -167,7 +172,7 @@ class PolymarketBot:
                     self.strategies.append(strat)
                     cprint(f"   ✅ {name}: {strat.description}", "white")
             # Also load passive/advanced strategies that pair well
-            for extra in ["stink_bid", "vpin", "sentiment", "combinatorial_arb"]:
+            for extra in ["stink_bid", "arbitrage", "vpin", "sentiment", "combinatorial_arb", "wallet_copy"]:
                 strat = _load_strategy(extra)
                 if strat:
                     self.strategies.append(strat)
@@ -184,6 +189,10 @@ class PolymarketBot:
         self.is_running = False
         self.markets: Dict[str, Dict] = {}  # condition_id -> market data
         self.market_data_cache: Dict[str, MarketData] = {}
+        self._scan_count = 0
+        
+        # TUI dashboard
+        self.dashboard = Dashboard()
         
         # Threads
         self._main_thread: Optional[threading.Thread] = None
@@ -197,6 +206,9 @@ class PolymarketBot:
     
     def _handle_shutdown(self, signum, frame):
         """Handle shutdown signals gracefully."""
+        # Exit TUI immediately so shutdown messages appear in normal terminal
+        set_dashboard_mode(False)
+        self.dashboard.stop()
         cprint("\n\n⚠️  Shutdown signal received...", "yellow")
         self.stop()
     
@@ -270,6 +282,12 @@ class PolymarketBot:
             cprint(f"   Adaptive Risk: ✅ bankroll-proportional", "cyan")
         cprint("\n   Press Ctrl+C to stop\n", "yellow")
         
+        # Start TUI dashboard — takes over the terminal
+        time.sleep(0.5)  # let final startup messages flush
+        self.dashboard.start()
+        set_dashboard_mode(True)
+        dash_log("✅ Bot started — dashboard active")
+        
         # Telegram startup alert
         balance = self.risk_manager.current_balance
         self.telegram.alert_startup(
@@ -285,6 +303,10 @@ class PolymarketBot:
         """Stop the trading bot gracefully."""
         if not self.is_running:
             return
+        
+        # Restore normal terminal before printing shutdown info
+        set_dashboard_mode(False)
+        self.dashboard.stop()
         
         cprint("\n🛑 Stopping bot...", "yellow")
         self.is_running = False
@@ -392,47 +414,53 @@ class PolymarketBot:
     
     def _scan_and_trade(self):
         """Scan markets and execute strategy (or all strategies in multi-mode)."""
+        from .logging_utils import _DASHBOARD_MODE
+        
+        self._scan_count += 1
+        
         # Check if trading is allowed
         can_trade, reason = self.risk_manager.can_trade()
         if not can_trade:
             cprint(f"⏸️  Trading paused: {reason}", "yellow")
+            self._push_dashboard_state()
             return
         
         # Build market data for strategy
         market_data_list = self._build_market_data()
         
         if not market_data_list:
-            cprint(f"✅ Loaded {len(self.markets)} markets", "green")
-            cprint(f"📊 Scanning {len(self.markets)} markets... (no price data yet)", "white")
+            if not _DASHBOARD_MODE:
+                cprint(f"📊 Scanning {len(self.markets)} markets... (no price data yet)", "white")
+            self._push_dashboard_state()
             return
         
-        cprint(f"\n📊 Analyzed {len(market_data_list)} tokens @ {datetime.now().strftime('%H:%M:%S')}", "cyan")
-        
-        # Log Binance state every scan (critical for diagnosing BTC strategy silence)
-        if hasattr(self, 'binance_feed') and self.binance_feed:
-            bs = self.binance_feed.get_state()
-            if bs.connected and bs.last_price > 0:
-                cprint(
-                    f"   📡 BTC ${bs.last_price:,.0f} | "
-                    f"10s={bs.price_change_pct_10s:+.4f}% "
-                    f"30s={bs.price_change_pct_30s:+.4f}% "
-                    f"60s={bs.price_change_pct_60s:+.4f}% | "
-                    f"vol={bs.volatility_5m:.2f}σ press={bs.bid_pressure:.2f}",
-                    "dark_grey",
-                )
-            elif not bs.connected:
-                cprint("   📡 Binance: NOT CONNECTED", "red")
+        # Binance state (logged to panel, not spammed to log)
+        if not _DASHBOARD_MODE:
+            cprint(f"\n📊 Analyzed {len(market_data_list)} tokens @ {datetime.now().strftime('%H:%M:%S')}", "cyan")
+            if hasattr(self, 'binance_feed') and self.binance_feed:
+                bs = self.binance_feed.get_state()
+                if bs.connected and bs.last_price > 0:
+                    cprint(
+                        f"   📡 BTC ${bs.last_price:,.0f} | "
+                        f"10s={bs.price_change_pct_10s:+.4f}% "
+                        f"30s={bs.price_change_pct_30s:+.4f}% "
+                        f"60s={bs.price_change_pct_60s:+.4f}% | "
+                        f"vol={bs.volatility_5m:.2f}σ press={bs.bid_pressure:.2f}",
+                        "dark_grey",
+                    )
+                elif not bs.connected:
+                    cprint("   📡 Binance: NOT CONNECTED", "red")
         
         # First-scan diagnostic: show market matching stats
         if not self._first_scan_done:
             self._first_scan_done = True
             self._log_market_diagnostics(market_data_list)
         
-        # Show adaptive risk state
+        # Show adaptive risk state (only log if throttled — that's important)
         if self.risk_manager.adaptive_enabled:
             throttle = self.risk_manager.get_throttle_factor()
             if throttle < 1.0:
-                cprint(f"   ⚠️  Throttle: {throttle*100:.0f}% (drawdown protection active)", "yellow")
+                cprint(f"⚠️  Throttle: {throttle*100:.0f}% (drawdown protection active)", "yellow")
         
         # Run each strategy
         total_signals = 0
@@ -442,7 +470,7 @@ class PolymarketBot:
             # Check strategy health before running
             healthy, health_reason = self.strategy_tracker.is_strategy_healthy(strategy.name)
             if not healthy:
-                cprint(f"   [{strat_name}] ⏸️  Disabled: {health_reason}", "yellow")
+                cprint(f"[{strat_name}] ⏸️  Disabled: {health_reason}", "yellow")
                 continue
             
             # Run strategy analysis
@@ -450,50 +478,161 @@ class PolymarketBot:
             
             if signals:
                 total_signals += len(signals)
-                cprint(f"🎯 [{strat_name}] {len(signals)} signal(s)!", "green", attrs=["bold"])
                 
                 # Execute signals
-                for signal in signals:
+                n_blocked = 0
+                n_executed = 0
+                block_reason = ""
+                for sig in signals:
                     # Use adaptive order sizing
-                    trade_value = signal.size * signal.price
+                    trade_value = sig.size * sig.price
                     adaptive_size = self.risk_manager.get_adaptive_order_size(trade_value)
                     
                     # Check risk limits with adaptive-sized trade
                     can_open, reason = self.risk_manager.can_open_position(
-                        signal.token_id,
+                        sig.token_id,
                         adaptive_size,
-                        signal.price,
+                        sig.price,
                         strategy=strategy.name,
                     )
                     
                     if not can_open:
-                        cprint(f"   ⚠️  Risk blocked: {reason}", "yellow")
+                        n_blocked += 1
+                        block_reason = reason
                         continue
                     
                     # Execute via strategy
-                    results = strategy.execute([signal], self.order_manager)
+                    results = strategy.execute([sig], self.order_manager)
                     
                     # Record trade in both risk manager and analytics tracker
                     for result in results:
                         if result.get("success"):
+                            n_executed += 1
                             fee_est = adaptive_size * 0.01  # ~1% fee
                             self.risk_manager.record_trade(adaptive_size, fee_est)
                             self.strategy_tracker.record_trade(
                                 strategy=strategy.name,
-                                token_id=signal.token_id,
-                                market_slug=signal.market_slug,
-                                side=signal.side,
-                                price=signal.price,
-                                size=signal.size,
+                                token_id=sig.token_id,
+                                market_slug=sig.market_slug,
+                                side=sig.side,
+                                price=sig.price,
+                                size=sig.size,
                                 pnl=0.0,  # P&L tracked on exit
                                 fees=fee_est,
                                 is_exit=False,
                             )
+                
+                # Log summary: executed trades always, risk blocks throttled
+                if n_executed > 0:
+                    cprint(f"🎯 [{strat_name}] {n_executed}/{len(signals)} signal(s) executed!", "green", attrs=["bold"])
+                if n_blocked > 0:
+                    import time as _t
+                    _rb_log = getattr(self, '_risk_block_log', {})
+                    _now = _t.time()
+                    if _now - _rb_log.get(strat_name, 0) >= 30:
+                        _rb_log[strat_name] = _now
+                        self._risk_block_log = _rb_log
+                        cprint(f"⚠️  [{strat_name}] {n_blocked} blocked: {block_reason}", "yellow")
             else:
-                cprint(f"   [{strat_name}] No opportunities", "white")
+                # "No opportunities" is noise — skip in dashboard mode
+                if not _DASHBOARD_MODE:
+                    cprint(f"   [{strat_name}] No opportunities", "white")
         
-        if total_signals == 0:
+        if total_signals == 0 and not _DASHBOARD_MODE:
             cprint(f"   Waiting for opportunities...", "white")
+        
+        # Update the TUI dashboard
+        self._push_dashboard_state()
+    
+    def _push_dashboard_state(self) -> None:
+        """Build a DashboardState snapshot and push it to the TUI."""
+        from .logging_utils import _DASHBOARD_MODE
+        if not _DASHBOARD_MODE:
+            return
+        
+        # Binance snapshot
+        bs = BinanceSnapshot()
+        if self.binance_feed:
+            b = self.binance_feed.get_state()
+            bs = BinanceSnapshot(
+                connected=b.connected,
+                price=b.last_price,
+                chg_10s=b.price_change_pct_10s,
+                chg_30s=b.price_change_pct_30s,
+                chg_60s=b.price_change_pct_60s,
+                volatility=b.volatility_5m,
+                pressure=b.bid_pressure,
+            )
+        
+        # Strategy rows
+        strat_rows = []
+        for strat in self.strategies:
+            state = strat.get_state()
+            healthy, _ = self.strategy_tracker.is_strategy_healthy(strat.name)
+            
+            # Last signal time
+            last_ts = ""
+            if hasattr(strat, 'last_signal_time') and strat.last_signal_time:
+                most_recent = max(strat.last_signal_time.values()) if strat.last_signal_time else 0
+                if most_recent > 0:
+                    ago = time.time() - most_recent
+                    if ago < 60:
+                        last_ts = f"{ago:.0f}s ago"
+                    elif ago < 3600:
+                        last_ts = f"{ago/60:.0f}m ago"
+                    else:
+                        last_ts = f"{ago/3600:.1f}h ago"
+            
+            strat_rows.append(StrategyRow(
+                name=strat.name,
+                signals=state['signals_generated'],
+                trades=state['trades_executed'],
+                pnl=state['pnl'],
+                healthy=healthy,
+                last_signal=last_ts,
+            ))
+        
+        # Portfolio snapshot
+        rm = self.risk_manager
+        active_orders = 0
+        om_filled = 0
+        om_cancelled = 0
+        om_fill_rate = 0.0
+        max_orders = 10
+        if self.order_manager:
+            active_orders = len(self.order_manager.get_active_orders())
+            om_stats = self.order_manager.get_stats()
+            om_filled = om_stats.get('total_filled', 0)
+            om_cancelled = om_stats.get('total_cancelled', 0)
+            om_fill_rate = om_stats.get('fill_rate', 0) * 100
+            max_orders = getattr(self.order_manager, 'max_active_orders', 10)
+        
+        total_exp = rm.get_total_exposure()
+        rm_status = rm.get_status()
+        portfolio = PortfolioSnapshot(
+            balance=rm.current_balance,
+            start_balance=rm.starting_balance,
+            exposure=total_exp,
+            exposure_pct=(total_exp / rm.current_balance * 100) if rm.current_balance > 0 else 0,
+            daily_pnl=rm_status.get('daily_pnl', 0.0),
+            positions=len(rm.positions),
+            active_orders=active_orders,
+            max_orders=max_orders,
+            filled=om_filled,
+            cancelled=om_cancelled,
+            fill_rate=om_fill_rate,
+            throttle=rm.get_throttle_factor() if rm.adaptive_enabled else 1.0,
+        )
+        
+        state = DashboardState(
+            paper=PAPER_TRADING,
+            n_markets=len(self.markets),
+            scan_number=self._scan_count,
+            binance=bs,
+            strategies=strat_rows,
+            portfolio=portfolio,
+        )
+        self.dashboard.update(state)
     
     def _build_market_data(self) -> List[MarketData]:
         """Build MarketData objects from cached data."""
@@ -1035,7 +1174,7 @@ def main():
         default="btc_5min",
         help=(
             "Strategy to use: stink_bid, late_money, cross_asset, "
-            "terminal_convergence, orderbook_imbalance, "
+            "terminal_convergence, orderbook_imbalance, wallet_copy, "
             "'btc_5min' (recommended), or 'all' (default: btc_5min)"
         )
     )

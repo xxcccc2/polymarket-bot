@@ -15,6 +15,7 @@ Example:
 - Guaranteed $1 return on 98¢ = 2.04% profit (risk-free)
 """
 
+import time
 from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
 from ..logging_utils import cprint
@@ -26,6 +27,10 @@ from .base_strategy import (
     MarketData
 )
 from ..config import ORDER_SIZE_USD, TRADING_FEE_RATE
+
+# Keywords identifying short-term crypto markets (5-min, 15-min, 1-hour)
+_SHORTTERM_KEYWORDS = ["5 min", "15 min", "1 hour", "up or down", "updown"]
+_CRYPTO_KEYWORDS = ["bitcoin", "btc", "ethereum", "eth"]
 
 
 class ArbitrageStrategy(BaseStrategy):
@@ -54,6 +59,9 @@ class ArbitrageStrategy(BaseStrategy):
         self.max_arbs_active = self.config.get("max_arbs_active", 10)
         self.include_fees = self.config.get("include_fees", True)
         
+        # Client for fetching real orderbook data
+        self._client = self.config.get("client")
+        
         # Track active arbitrage positions
         self.active_arbs: Dict[str, Dict] = {}  # condition_id -> arb info
         self.completed_arbs: List[Dict] = []  # History
@@ -61,10 +69,24 @@ class ArbitrageStrategy(BaseStrategy):
         # Market pairs cache: condition_id -> {yes_token_id, no_token_id, ...}
         self.market_pairs: Dict[str, Dict] = {}
         
+        # Orderbook fetch throttle (avoid hammering the API)
+        self._last_book_fetch: float = 0
+        self._book_fetch_interval: float = float(
+            self.config.get("book_fetch_interval", 30)  # seconds
+        )
+        self._max_book_fetches: int = int(
+            self.config.get("max_book_fetches", 5)  # max pairs per cycle
+        )
+        
         # Stats
         self.opportunities_found = 0
         self.arbs_executed = 0
         self.total_profit = 0.0
+        self._markets_scanned = 0
+        
+        mode = "live orderbook" if self._client else "derived prices"
+        cprint(f"   ⚖️  Arbitrage: min_profit={self.min_profit_cents}¢, "
+               f"mode={mode}", "white")
     
     def register_market_pair(
         self,
@@ -139,14 +161,49 @@ class ArbitrageStrategy(BaseStrategy):
             "profit_cents": profit_cents,
         }
     
+    @staticmethod
+    def _is_shortterm_crypto(md: MarketData) -> bool:
+        """Check if a market is a short-term crypto contract."""
+        text = f"{md.question} {md.market_slug}".lower()
+        has_crypto = any(kw in text for kw in _CRYPTO_KEYWORDS)
+        has_shortterm = any(kw in text for kw in _SHORTTERM_KEYWORDS)
+        return has_crypto and has_shortterm
+
+    def _fetch_real_book_prices(
+        self, token_id: str
+    ) -> Optional[Tuple[float, float]]:
+        """Fetch real best bid/ask — bypass retry wrapper for speed."""
+        if not self._client:
+            return None
+        try:
+            # Call raw CLOB client directly (no 3x retry + backoff)
+            raw = getattr(self._client, 'client', None)
+            if raw is None:
+                return None
+            book = raw.get_order_book(token_id)
+            if not book:
+                return None
+            asks = book.get("asks", [])
+            bids = book.get("bids", [])
+            best_ask = float(asks[0]["price"]) if asks else None
+            best_bid = float(bids[0]["price"]) if bids else None
+            if best_ask is None:
+                return None
+            return (best_bid or 0, best_ask)
+        except Exception:
+            return None
+
     def analyze(self, market_data: List[MarketData]) -> List[Signal]:
         """
         Find arbitrage opportunities across YES/NO pairs.
         
-        Note: This requires market_data to contain both YES and NO tokens
-        for the same markets. Call register_market_pair() first.
+        For short-term crypto markets, fetches real CLOB orderbook prices
+        for both tokens (the derived NO price is always 1 - YES, hiding
+        genuine glitches). Throttled to avoid API spam.
         """
         signals = []
+        now = time.time()
+        should_fetch = (now - self._last_book_fetch) >= self._book_fetch_interval
         
         # Group market data by condition_id
         by_condition: Dict[str, List[MarketData]] = {}
@@ -155,6 +212,10 @@ class ArbitrageStrategy(BaseStrategy):
             if cid not in by_condition:
                 by_condition[cid] = []
             by_condition[cid].append(data)
+        
+        n_candidates = 0
+        n_fetched = 0
+        best_gap = 999.0  # track closest-to-arb for diagnostics
         
         # Check each market for arb opportunities
         for condition_id, tokens in by_condition.items():
@@ -175,16 +236,76 @@ class ArbitrageStrategy(BaseStrategy):
             no_data = None
             
             for token in tokens:
-                if token.outcome.upper() == "YES":
+                outcome_upper = token.outcome.upper()
+                if outcome_upper in ("YES", "UP"):
                     yes_data = token
-                elif token.outcome.upper() == "NO":
+                elif outcome_upper in ("NO", "DOWN"):
                     no_data = token
             
             if not yes_data or not no_data:
                 continue
             
+            # Only target short-term crypto markets (small set, worth the API cost)
+            if not self._is_shortterm_crypto(yes_data):
+                continue
+            
+            n_candidates += 1
+            
+            # Pre-filter: derived gap must be small enough to justify API call
+            derived_gap = yes_data.best_ask + no_data.best_ask - 1.0
+            
+            # Fetch real orderbook prices if throttle allows and gap is promising
+            real_yes_ask = yes_data.best_ask
+            real_no_ask = no_data.best_ask
+            
+            if (should_fetch and self._client
+                    and n_fetched < self._max_book_fetches
+                    and derived_gap < 0.03):  # only if derived gap < 3¢
+                yb = self._fetch_real_book_prices(yes_data.token_id)
+                nb = self._fetch_real_book_prices(no_data.token_id)
+                n_fetched += 1
+                if yb:
+                    real_yes_ask = yb[1]
+                if nb:
+                    real_no_ask = nb[1]
+            
+            # Override MarketData with real prices for arb check
+            patched_yes = MarketData(
+                token_id=yes_data.token_id,
+                condition_id=yes_data.condition_id,
+                market_slug=yes_data.market_slug,
+                question=yes_data.question,
+                outcome=yes_data.outcome,
+                best_bid=yes_data.best_bid,
+                best_ask=real_yes_ask,
+                mid_price=(yes_data.best_bid + real_yes_ask) / 2,
+                spread=real_yes_ask - yes_data.best_bid,
+                volume_24h=yes_data.volume_24h,
+                liquidity=yes_data.liquidity,
+                last_price=yes_data.last_price,
+            )
+            patched_no = MarketData(
+                token_id=no_data.token_id,
+                condition_id=no_data.condition_id,
+                market_slug=no_data.market_slug,
+                question=no_data.question,
+                outcome=no_data.outcome,
+                best_bid=no_data.best_bid,
+                best_ask=real_no_ask,
+                mid_price=(no_data.best_bid + real_no_ask) / 2,
+                spread=real_no_ask - no_data.best_bid,
+                volume_24h=no_data.volume_24h,
+                liquidity=no_data.liquidity,
+                last_price=no_data.last_price,
+            )
+            
+            total = real_yes_ask + real_no_ask
+            gap = total - 1.0
+            if gap < best_gap:
+                best_gap = gap
+            
             # Check for arbitrage opportunity
-            opportunity = self._find_arb_opportunity(yes_data, no_data)
+            opportunity = self._find_arb_opportunity(patched_yes, patched_no)
             
             if not opportunity:
                 continue
@@ -250,6 +371,22 @@ class ArbitrageStrategy(BaseStrategy):
             
             signals.extend([yes_signal, no_signal])
             self.signals_generated += 2
+        
+        if should_fetch:
+            self._last_book_fetch = now
+        self._markets_scanned = n_candidates
+        
+        # Throttled diagnostic
+        if not signals and n_candidates > 0:
+            last_diag = getattr(self, '_last_diag_log', 0)
+            if now - last_diag >= 30:
+                self._last_diag_log = now
+                gap_cents = best_gap * 100
+                cprint(
+                    f"  ⚖️  arb scan: {n_candidates} crypto pairs | "
+                    f"best_gap={gap_cents:+.1f}¢ (need <0¢ after fees)",
+                    "dark_grey",
+                )
         
         return signals
     
@@ -402,6 +539,7 @@ class ArbitrageStrategy(BaseStrategy):
             "opportunities_found": self.opportunities_found,
             "total_profit": self.total_profit,
             "completed_arbs": len(self.completed_arbs),
+            "markets_scanned": self._markets_scanned,
         })
         return state
     

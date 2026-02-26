@@ -41,6 +41,7 @@ from .orderbook_imbalance_strategy import OrderbookImbalanceStrategy
 from .vpin_strategy import VPINStrategy
 from .sentiment_strategy import SentimentStrategy
 from .combinatorial_arb_strategy import CombinatorialArbStrategy
+from .wallet_copy_strategy import WalletCopyStrategy
 
 # Registry of available strategies
 AVAILABLE_STRATEGIES = {
@@ -56,6 +57,7 @@ AVAILABLE_STRATEGIES = {
     "vpin": VPINStrategy,
     "sentiment": SentimentStrategy,
     "combinatorial_arb": CombinatorialArbStrategy,
+    "wallet_copy": WalletCopyStrategy,
 }
 
 

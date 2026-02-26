@@ -277,6 +277,16 @@ class OrderManager:
             
             result["order"] = order
             self._persist_order(order)
+            
+            # Paper trading: simulate immediate fill
+            if PAPER_TRADING:
+                self.process_fill(order_id, {
+                    "price": price,
+                    "size": size,
+                    "trade_id": f"paper_fill_{int(time.time()*1000)}",
+                    "side": side.upper(),
+                    "token_id": token_id,
+                })
         
         return result
     

@@ -13,6 +13,7 @@ Concept:
 This is an asymmetric bet strategy - small losses, huge potential wins.
 """
 
+import time
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
 from ..logging_utils import cprint
@@ -181,11 +182,17 @@ class StinkBidStrategy(BaseStrategy):
             signals.append(signal)
             self.signals_generated += 1
             
-            cprint(
-                f"🎯 Stink bid opportunity: {data.market_slug[:50]} | "
-                f"Depth: {depth_ratio*100:.1f}% | Potential: {potential_multiplier:.0f}x",
-                "magenta"
-            )
+            # Throttle per-market logging (same market re-appears every scan)
+            now = time.time()
+            _last = getattr(self, '_last_opp_log', {})
+            if now - _last.get(data.market_slug, 0) >= 60:
+                _last[data.market_slug] = now
+                self._last_opp_log = _last
+                cprint(
+                    f"🎯 Stink bid opportunity: {data.market_slug[:50]} | "
+                    f"Depth: {depth_ratio*100:.1f}% | Potential: {potential_multiplier:.0f}x",
+                    "magenta"
+                )
         
         return signals
     
