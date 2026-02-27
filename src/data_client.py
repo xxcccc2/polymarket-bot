@@ -110,3 +110,24 @@ def get_leaderboard(
     }
     data = _request("GET", "/v1/leaderboard", params=params)
     return data if isinstance(data, list) else []
+
+
+def get_portfolio_value(user: str) -> Optional[float]:
+    """
+    Get total portfolio value for a wallet (proxy address).
+    Returns total USDC value (positions + available) — used when CLOB balance is unavailable.
+    """
+    if not user or not user.startswith("0x"):
+        return None
+    try:
+        params = {"user": user}
+        data = _request("GET", "/value", params=params)
+        if isinstance(data, list) and len(data) > 0:
+            val = data[0].get("value")
+            if val is not None:
+                return float(val)
+        if isinstance(data, dict) and "value" in data:
+            return float(data["value"])
+    except Exception:
+        pass
+    return None

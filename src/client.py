@@ -39,6 +39,7 @@ from .config import (
     RETRY_BASE_DELAY_SECONDS,
     RETRY_MAX_DELAY_SECONDS,
 )
+from .data_client import get_portfolio_value
 
 # Will be imported when py-clob-client is installed
 try:
@@ -544,6 +545,14 @@ class PolymarketClient:
                 bal = parse_balance(response)
                 if bal is not None:
                     return bal
+            # Fallback: Polymarket Data API /value (total portfolio value)
+            if PROXY_ADDRESS:
+                try:
+                    fallback = get_portfolio_value(PROXY_ADDRESS)
+                    if fallback is not None and fallback >= 0:
+                        return fallback
+                except Exception:
+                    pass
             return None
 
         return _call_with_timeout(_try_methods, timeout_s=15, default=None)

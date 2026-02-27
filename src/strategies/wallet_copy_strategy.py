@@ -20,6 +20,7 @@ from ..logging_utils import cprint
 from ..data_client import get_trades_by_user, get_leaderboard
 from ..config import (
     ORDER_SIZE_USD,
+    PROXY_ADDRESS,
     TRACKED_WALLETS,
     WALLET_COPY_USE_LEADERBOARD,
     WALLET_COPY_LEADERBOARD_TOP_N,
@@ -194,7 +195,10 @@ class WalletCopyStrategy(BaseStrategy):
         if not self.tracked_wallets:
             return signals
         
+        our_wallet = (PROXY_ADDRESS or "").lower()
         for wallet in self.tracked_wallets:
+            if our_wallet and wallet and wallet.lower() == our_wallet:
+                continue  # Never copy ourselves
             try:
                 trades = get_trades_by_user(wallet, limit=20, taker_only=True)
             except Exception as e:
