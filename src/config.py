@@ -6,9 +6,17 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 
-# Load environment variables
+# Load environment variables in two layers:
+# 1) Optional shared non-secret config file (for collaboration/agents)
+# 2) Private .env secrets file (overrides shared values)
 PROJECT_ROOT = Path(__file__).parent.parent
-load_dotenv(dotenv_path=PROJECT_ROOT / '.env')
+PUBLIC_CONFIG_FILE = os.getenv(
+    "BOT_PUBLIC_CONFIG_FILE",
+    str(PROJECT_ROOT / "config" / "bot.public.env"),
+)
+if Path(PUBLIC_CONFIG_FILE).exists():
+    load_dotenv(dotenv_path=PUBLIC_CONFIG_FILE, override=False)
+load_dotenv(dotenv_path=PROJECT_ROOT / '.env', override=True)
 
 # =============================================================================
 # POLYMARKET API SETTINGS
@@ -46,8 +54,19 @@ BINANCE_SYMBOL = os.getenv("BINANCE_SYMBOL", "btcusdt")
 # =============================================================================
 # CREDENTIALS (from .env)
 # =============================================================================
-PRIVATE_KEY = os.getenv("POLYMARKET_PRIVATE_KEY", "")
-PROXY_ADDRESS = os.getenv("POLYMARKET_PROXY_ADDRESS", "")
+# Optional wallet profile selector for multi-wallet runs on same machine.
+# Example:
+#   BOT_WALLET_ID=ALPHA
+#   POLYMARKET_PRIVATE_KEY_ALPHA=...
+#   POLYMARKET_PROXY_ADDRESS_ALPHA=0x...
+BOT_WALLET_ID = os.getenv("BOT_WALLET_ID", "").strip()
+if BOT_WALLET_ID:
+    _suffix = BOT_WALLET_ID.upper()
+    PRIVATE_KEY = os.getenv(f"POLYMARKET_PRIVATE_KEY_{_suffix}", "") or os.getenv("POLYMARKET_PRIVATE_KEY", "")
+    PROXY_ADDRESS = os.getenv(f"POLYMARKET_PROXY_ADDRESS_{_suffix}", "") or os.getenv("POLYMARKET_PROXY_ADDRESS", "")
+else:
+    PRIVATE_KEY = os.getenv("POLYMARKET_PRIVATE_KEY", "")
+    PROXY_ADDRESS = os.getenv("POLYMARKET_PROXY_ADDRESS", "")
 
 # Signature type: 1 = Email/Magic, 2 = Browser wallet (MetaMask, Binance, etc.)
 SIGNATURE_TYPE = 2
@@ -264,6 +283,13 @@ RETRY_MAX_ATTEMPTS = int(os.getenv("RETRY_MAX_ATTEMPTS", "3"))
 RETRY_BASE_DELAY_SECONDS = float(os.getenv("RETRY_BASE_DELAY_SECONDS", "0.5"))
 RETRY_MAX_DELAY_SECONDS = float(os.getenv("RETRY_MAX_DELAY_SECONDS", "5"))
 
+# Auto-refresh CLOB allowance to prevent live trading stalls
+AUTO_ALLOWANCE_REFRESH_ENABLED = os.getenv("AUTO_ALLOWANCE_REFRESH_ENABLED", "true").lower() == "true"
+ALLOWANCE_REFRESH_SECONDS = int(os.getenv("ALLOWANCE_REFRESH_SECONDS", "900"))
+
+# Disable analytics/P&L tracking to reduce runtime overhead
+ENABLE_STRATEGY_ANALYTICS = os.getenv("ENABLE_STRATEGY_ANALYTICS", "true").lower() == "true"
+
 # =============================================================================
 # RATE LIMITS (Polymarket CLOB)
 # =============================================================================
@@ -290,7 +316,10 @@ DATA_DIR = PROJECT_ROOT / "data"
 LOGS_DIR = PROJECT_ROOT / "logs"
 
 # SQLite database path for persisted bot state
-BOT_STATE_DB = Path(os.getenv("BOT_STATE_DB", str(DATA_DIR / "bot_state.sqlite")))
+_default_db_name = (
+    f"bot_state_{BOT_WALLET_ID.lower()}.sqlite" if BOT_WALLET_ID else "bot_state.sqlite"
+)
+BOT_STATE_DB = Path(os.getenv("BOT_STATE_DB", str(DATA_DIR / _default_db_name)))
 
 # Create directories if they don't exist
 DATA_DIR.mkdir(exist_ok=True)

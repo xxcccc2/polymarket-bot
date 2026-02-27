@@ -38,13 +38,20 @@ from .config import (
     RETRY_MAX_ATTEMPTS,
     RETRY_BASE_DELAY_SECONDS,
     RETRY_MAX_DELAY_SECONDS,
+    AUTO_ALLOWANCE_REFRESH_ENABLED,
+    ALLOWANCE_REFRESH_SECONDS,
 )
 from .data_client import get_balance_total
 
 # Will be imported when py-clob-client is installed
 try:
     from py_clob_client.client import ClobClient
-    from py_clob_client.clob_types import OrderArgs, OrderType
+    from py_clob_client.clob_types import (
+        OrderArgs,
+        OrderType,
+        BalanceAllowanceParams,
+        AssetType,
+    )
     from py_clob_client.order_builder.constants import BUY, SELL
     CLOB_AVAILABLE = True
 except ImportError:
@@ -69,9 +76,65 @@ class PolymarketClient:
         self.last_order_time = 0
         self.orders_this_second = 0
         self.api_creds_set = False
+        self.last_allowance_refresh = 0.0
         
         # Track rate limits
         self.min_order_interval = 1.0 / ORDER_RATE_LIMIT_SUSTAINED
+
+    @staticmethod
+    def _is_allowance_error(error_msg: str) -> bool:
+        msg = (error_msg or "").lower()
+        return "allowance" in msg or "not enough balance / allowance" in msg
+
+    @staticmethod
+    def _is_auth_error(error_msg: str) -> bool:
+        msg = (error_msg or "").lower()
+        return "unauthorized" in msg or "invalid api key" in msg or "status_code=401" in msg
+
+    def _refresh_api_creds(self, reason: str = "auth-retry") -> bool:
+        """Re-derive L2 API credentials after 401/invalid-key responses."""
+        if not self.client or PAPER_TRADING:
+            return False
+        try:
+            cprint(f"🔑 Refreshing API credentials ({reason})...", "yellow")
+            self.client.set_api_creds(self.client.create_or_derive_api_creds())
+            self.api_creds_set = True
+            return True
+        except Exception as exc:
+            cprint(f"⚠️  API credential refresh failed ({reason}): {exc}", "yellow")
+            return False
+
+    def _refresh_allowance(self, force: bool = False, reason: str = "periodic") -> bool:
+        """
+        Refresh CLOB collateral allowance.
+        This is safe to call repeatedly; uses interval gating unless forced.
+        """
+        if PAPER_TRADING or not AUTO_ALLOWANCE_REFRESH_ENABLED:
+            return False
+        if not self.is_connected or not self.client or not self.api_creds_set:
+            return False
+
+        now = time.time()
+        if not force and (now - self.last_allowance_refresh) < ALLOWANCE_REFRESH_SECONDS:
+            return True
+
+        try:
+            collateral_params = BalanceAllowanceParams(
+                asset_type=AssetType.COLLATERAL,
+                signature_type=SIGNATURE_TYPE,
+            )
+
+            self._retry_call(
+                lambda: self.client.update_balance_allowance(collateral_params),
+                "Update collateral allowance",
+            )
+
+            self.last_allowance_refresh = now
+            cprint(f"🔐 Refreshed CLOB allowance ({reason})", "cyan")
+            return True
+        except Exception as exc:
+            cprint(f"⚠️  Allowance refresh failed ({reason}): {exc}", "yellow")
+            return False
         
     def connect(self) -> bool:
         """
@@ -103,6 +166,7 @@ class PolymarketClient:
             cprint("🔑 Setting up API credentials...", "cyan")
             self.client.set_api_creds(self.client.create_or_derive_api_creds())
             self.api_creds_set = True
+            self._refresh_allowance(force=True, reason="startup")
             
             self.is_connected = True
             cprint("✅ Connected to Polymarket CLOB", "green")
@@ -369,6 +433,8 @@ class PolymarketClient:
             }
         
         try:
+            self._refresh_allowance(force=False, reason="pre-order")
+
             # Rate limiting
             self._rate_limit()
             
@@ -403,6 +469,35 @@ class PolymarketClient:
             
         except Exception as e:
             error_msg = str(e)
+            if self._is_allowance_error(error_msg):
+                cprint("🔁 Allowance error detected, forcing allowance refresh and retrying once...", "yellow")
+                refreshed = self._refresh_allowance(force=True, reason="order-error")
+                if refreshed:
+                    try:
+                        self._rate_limit()
+                        order_args = OrderArgs(
+                            price=price,
+                            size=size,
+                            side=BUY if side.upper() == "BUY" else SELL,
+                            token_id=token_id
+                        )
+                        signed_order = self._retry_call(
+                            lambda: self.client.create_order(order_args),
+                            "Create order",
+                        )
+                        ot = OrderType.GTC if order_type == "GTC" else OrderType.FOK
+                        result = self._retry_call(
+                            lambda: self.client.post_order(signed_order, ot),
+                            "Post order",
+                        )
+                        cprint(f"✅ Order placed after allowance refresh: {side} {size:.2f} @ ${price:.3f}", "green")
+                        return {
+                            "success": True,
+                            "order_id": result.get("orderID") or result.get("id"),
+                            "result": result,
+                        }
+                    except Exception as retry_exc:
+                        error_msg = str(retry_exc)
             cprint(f"❌ Order failed: {error_msg}", "red")
             
             return {
@@ -464,7 +559,14 @@ class PolymarketClient:
             return orders if orders else []
             
         except Exception as e:
-            cprint(f"❌ Failed to fetch orders: {e}", "red")
+            error_msg = str(e)
+            if self._is_auth_error(error_msg) and self._refresh_api_creds(reason="get_open_orders"):
+                try:
+                    orders = self._retry_call(lambda: self.client.get_orders(), "Fetch open orders")
+                    return orders if orders else []
+                except Exception as retry_exc:
+                    error_msg = str(retry_exc)
+            cprint(f"❌ Failed to fetch orders: {error_msg}", "red")
             return []
     
     def get_trades(self, limit: int = 100) -> List[Dict]:
@@ -481,7 +583,18 @@ class PolymarketClient:
             return trades[:limit] if trades else []
 
         except Exception as e:
-            cprint(f"❌ Failed to fetch trades: {e}", "red")
+            error_msg = str(e)
+            if self._is_auth_error(error_msg) and self._refresh_api_creds(reason="get_trades"):
+                try:
+                    trades = _call_with_timeout(
+                        lambda: self._retry_call(lambda: self.client.get_trades(), "Fetch trades"),
+                        timeout_s=15,
+                        default=[],
+                    )
+                    return trades[:limit] if trades else []
+                except Exception as retry_exc:
+                    error_msg = str(retry_exc)
+            cprint(f"❌ Failed to fetch trades: {error_msg}", "red")
             return []
     
     def get_balance(self) -> Optional[float]:

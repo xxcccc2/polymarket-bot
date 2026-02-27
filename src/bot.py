@@ -40,6 +40,7 @@ from .config import (
     MIN_VOLUME_USD,
     print_config,
     validate_config,
+    ENABLE_STRATEGY_ANALYTICS,
 )
 from .client import PolymarketClient
 from .websocket_feed import WebSocketFeed
@@ -103,7 +104,8 @@ class PolymarketBot:
             store=self.store,
             adaptive_config={"enabled": ADAPTIVE_RISK_ENABLED},
         )
-        self.strategy_tracker = StrategyTracker()
+        self.analytics_enabled = ENABLE_STRATEGY_ANALYTICS
+        self.strategy_tracker = StrategyTracker() if self.analytics_enabled else None
         
         # Telegram alerter
         self.telegram = TelegramAlerter(
@@ -350,7 +352,8 @@ class PolymarketBot:
         
         # Print final stats
         self._print_final_stats()
-        self.strategy_tracker.print_scorecard()
+        if self.analytics_enabled and self.strategy_tracker:
+            self.strategy_tracker.print_scorecard()
         
         # Telegram shutdown alert (includes session summary)
         self.telegram.alert_shutdown("User requested")
@@ -475,10 +478,11 @@ class PolymarketBot:
             strat_name = strategy.name.upper()
             
             # Check strategy health before running
-            healthy, health_reason = self.strategy_tracker.is_strategy_healthy(strategy.name)
-            if not healthy:
-                cprint(f"[{strat_name}] ⏸️  Disabled: {health_reason}", "yellow")
-                continue
+            if self.analytics_enabled and self.strategy_tracker:
+                healthy, health_reason = self.strategy_tracker.is_strategy_healthy(strategy.name)
+                if not healthy:
+                    cprint(f"[{strat_name}] ⏸️  Disabled: {health_reason}", "yellow")
+                    continue
             
             # Run strategy analysis
             signals = strategy.analyze(market_data_list)
@@ -517,17 +521,18 @@ class PolymarketBot:
                             n_executed += 1
                             fee_est = adaptive_size * 0.01  # ~1% fee
                             self.risk_manager.record_trade(adaptive_size, fee_est)
-                            self.strategy_tracker.record_trade(
-                                strategy=strategy.name,
-                                token_id=sig.token_id,
-                                market_slug=sig.market_slug,
-                                side=sig.side,
-                                price=sig.price,
-                                size=sig.size,
-                                pnl=0.0,  # P&L tracked on exit
-                                fees=fee_est,
-                                is_exit=is_sell,
-                            )
+                            if self.analytics_enabled and self.strategy_tracker:
+                                self.strategy_tracker.record_trade(
+                                    strategy=strategy.name,
+                                    token_id=sig.token_id,
+                                    market_slug=sig.market_slug,
+                                    side=sig.side,
+                                    price=sig.price,
+                                    size=sig.size,
+                                    pnl=0.0,  # P&L tracked on exit
+                                    fees=fee_est,
+                                    is_exit=is_sell,
+                                )
                 
                 # Log summary: executed trades always, risk blocks throttled
                 if n_executed > 0:
@@ -575,7 +580,10 @@ class PolymarketBot:
         strat_rows = []
         for strat in self.strategies:
             state = strat.get_state()
-            healthy, _ = self.strategy_tracker.is_strategy_healthy(strat.name)
+            if self.analytics_enabled and self.strategy_tracker:
+                healthy, _ = self.strategy_tracker.is_strategy_healthy(strat.name)
+            else:
+                healthy = True
             
             # Last signal time
             last_ts = ""
@@ -594,7 +602,7 @@ class PolymarketBot:
                 name=strat.name,
                 signals=state['signals_generated'],
                 trades=state['trades_executed'],
-                pnl=state['pnl'],
+                pnl=state['pnl'] if self.analytics_enabled else 0.0,
                 healthy=healthy,
                 last_signal=last_ts,
             ))
@@ -989,16 +997,18 @@ class PolymarketBot:
                 side = trade.get("side", "").upper()
                 price = float(trade.get("price", 0))
                 size = float(trade.get("size", 0))
+                trade_order_id = trade.get("order_id") or trade.get("orderID")
                 
                 # Log the fill with strategy info
                 order = None
                 strategy_name = "unknown"
-                
-                for oid, o in self.order_manager.orders.items():
-                    if o.token_id == token_id and o.side == side:
-                        order = o
-                        strategy_name = o.metadata.get("strategy", "unknown")
-                        break
+
+                # Only trust fills that link directly to one of our known order IDs.
+                # Matching by token+side can incorrectly attribute other users' trades.
+                if trade_order_id:
+                    order = self.order_manager.orders.get(trade_order_id)
+                    if order:
+                        strategy_name = order.metadata.get("strategy", "unknown")
                 
                 if order:
                     cprint(f"💰 FILL [{strategy_name.upper()}]: {side} {size:.2f} @ ${price:.3f} | {order.market_slug}", "green", attrs=["bold"])
@@ -1060,7 +1070,7 @@ class PolymarketBot:
         
         # Record exit in analytics tracker
         strategy_name = order.metadata.get("strategy", "unknown") if order.metadata else "unknown"
-        if fill_data.get("side") == "SELL" and order.metadata:
+        if fill_data.get("side") == "SELL" and order.metadata and self.analytics_enabled and self.strategy_tracker:
             entry_price = order.metadata.get("entry_price", order.price)
             pnl = (fill_data.get("price", 0) - entry_price) * fill_data.get("size", 0)
             self.strategy_tracker.record_trade(
@@ -1146,16 +1156,21 @@ class PolymarketBot:
             state = strategy.get_state()
             total_signals += state['signals_generated']
             total_trades += state['trades_executed']
-            total_pnl += state['pnl']
+            if self.analytics_enabled:
+                total_pnl += state['pnl']
             
             cprint(f"\n  [{state['name'].upper()}]", "cyan")
-            cprint(f"    Signals: {state['signals_generated']} | Trades: {state['trades_executed']} | PnL: ${state['pnl']:.2f}", "white")
+            if self.analytics_enabled:
+                cprint(f"    Signals: {state['signals_generated']} | Trades: {state['trades_executed']} | PnL: ${state['pnl']:.2f}", "white")
+            else:
+                cprint(f"    Signals: {state['signals_generated']} | Trades: {state['trades_executed']} | PnL: disabled", "white")
         
         if len(self.strategies) > 1:
             cprint(f"\n  TOTAL:", "green", attrs=["bold"])
             cprint(f"    Signals: {total_signals} | Trades: {total_trades}", "white")
-            pnl_color = "green" if total_pnl >= 0 else "red"
-            cprint(f"    Combined PnL: ${total_pnl:.2f}", pnl_color)
+            if self.analytics_enabled:
+                pnl_color = "green" if total_pnl >= 0 else "red"
+                cprint(f"    Combined PnL: ${total_pnl:.2f}", pnl_color)
         
         # Order manager stats
         if self.order_manager:
