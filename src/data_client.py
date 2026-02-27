@@ -114,8 +114,9 @@ def get_leaderboard(
 
 def get_portfolio_value(user: str) -> Optional[float]:
     """
-    Get total portfolio value for a wallet (proxy address).
-    Returns total USDC value (positions + available) — used when CLOB balance is unavailable.
+    Get total portfolio value for a wallet (proxy address) from Data API /value.
+    Note: /value returns POSITION value (market exposure) only — NOT free USDC.
+    If you have mostly cash, use get_balance_total() instead.
     """
     if not user or not user.startswith("0x"):
         return None
@@ -123,11 +124,80 @@ def get_portfolio_value(user: str) -> Optional[float]:
         params = {"user": user}
         data = _request("GET", "/value", params=params)
         if isinstance(data, list) and len(data) > 0:
-            val = data[0].get("value")
-            if val is not None:
-                return float(val)
+            # Sum all values in case API returns multiple entries (e.g. per-market)
+            total = 0.0
+            for item in data:
+                if isinstance(item, dict):
+                    v = item.get("value")
+                    if v is not None:
+                        try:
+                            total += float(v)
+                        except (TypeError, ValueError):
+                            pass
+            if total >= 0:
+                return total
         if isinstance(data, dict) and "value" in data:
             return float(data["value"])
     except Exception:
         pass
     return None
+
+
+# USDC.e (bridged) on Polygon - used by Polymarket
+_USDC_POLYGON = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+_POLYGON_RPC = "https://polygon-bor-rpc.publicnode.com"
+
+
+def get_usdc_balance_on_chain(address: str) -> Optional[float]:
+    """
+    Read USDC balance from Polygon for a wallet (proxy address).
+    Returns balance in USD (6 decimals). Use when Data API /value is too low
+    (it returns position value only, not free USDC).
+    """
+    if not address or not address.startswith("0x") or len(address) != 42:
+        return None
+    try:
+        import requests
+        # balanceOf(address) selector
+        selector = "0x70a08231"
+        # Pad address to 32 bytes (lowercase, no 0x for the param)
+        addr = address.lower().replace("0x", "").zfill(64)
+        data_hex = selector + addr
+        payload = {
+            "jsonrpc": "2.0",
+            "method": "eth_call",
+            "params": [
+                {"to": _USDC_POLYGON, "data": data_hex},
+                "latest",
+            ],
+            "id": 1,
+        }
+        resp = requests.post(_POLYGON_RPC, json=payload, timeout=10)
+        if resp.status_code != 200:
+            return None
+        j = resp.json()
+        result = j.get("result")
+        if not result or result == "0x":
+            return 0.0
+        return int(result, 16) / 1_000_000  # USDC has 6 decimals
+    except Exception:
+        return None
+
+
+def get_balance_total(user: str) -> Optional[float]:
+    """
+    Get best estimate of total account value (free USDC + positions).
+    - On-chain USDC = proxy wallet balance (source of truth for available cash)
+    - Data API /value = position value only (market exposure, NOT free USDC)
+    When /value shows $0.02 but real balance is $77+, we use on-chain USDC.
+    """
+    if not user or not user.startswith("0x"):
+        return None
+    on_chain = get_usdc_balance_on_chain(user)
+    position_val = get_portfolio_value(user)
+    # Prefer on-chain when substantial (fixes /value showing $0.02 when balance is $77+)
+    if on_chain is not None and on_chain >= 1.0:
+        pv = position_val if position_val is not None and position_val > 0 else 0
+        return on_chain + pv
+    # Fallback: /value when on-chain fails, returns 0, or RPC unavailable
+    return position_val

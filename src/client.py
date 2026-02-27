@@ -39,7 +39,7 @@ from .config import (
     RETRY_BASE_DELAY_SECONDS,
     RETRY_MAX_DELAY_SECONDS,
 )
-from .data_client import get_portfolio_value
+from .data_client import get_balance_total
 
 # Will be imported when py-clob-client is installed
 try:
@@ -545,10 +545,11 @@ class PolymarketClient:
                 bal = parse_balance(response)
                 if bal is not None:
                     return bal
-            # Fallback: Polymarket Data API /value (total portfolio value)
+            # Fallback: on-chain USDC + Data API position value (total portfolio)
+            # Data API /value returns position value only — use get_balance_total
             if PROXY_ADDRESS:
                 try:
-                    fallback = get_portfolio_value(PROXY_ADDRESS)
+                    fallback = get_balance_total(PROXY_ADDRESS)
                     if fallback is not None and fallback >= 0:
                         return fallback
                 except Exception:

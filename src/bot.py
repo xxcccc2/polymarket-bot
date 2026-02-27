@@ -50,7 +50,7 @@ from .persistence import SqliteStore
 from .analytics.strategy_tracker import StrategyTracker
 from .alerts.telegram import TelegramAlerter
 from .strategies import get_strategy, list_strategies, BaseStrategy
-from .strategies.base_strategy import MarketData
+from .strategies.base_strategy import MarketData, SignalType
 
 
 class PolymarketBot:
@@ -127,6 +127,7 @@ class PolymarketBot:
         # Strategy config — inject shared resources into strategies
         merged_config = dict(strategy_config or {})
         merged_config["client"] = self.client
+        merged_config["risk_manager"] = self.risk_manager
         if self.binance_feed:
             merged_config["binance_feed"] = self.binance_feed
         
@@ -199,18 +200,24 @@ class PolymarketBot:
         self._market_fetch_thread: Optional[threading.Thread] = None
         
         # Register signal handlers
+        self._shutdown_requested = False
         signal.signal(signal.SIGINT, self._handle_shutdown)
         signal.signal(signal.SIGTERM, self._handle_shutdown)
         
         cprint("✅ Bot initialized!\n", "green")
     
     def _handle_shutdown(self, signum, frame):
-        """Handle shutdown signals gracefully."""
-        # Exit TUI immediately so shutdown messages appear in normal terminal
+        """Handle shutdown signals gracefully. Keep handler minimal so it returns quickly."""
+        if self._shutdown_requested:
+            # Second Ctrl+C: force exit immediately
+            import os
+            os._exit(0)
+        self._shutdown_requested = True
         set_dashboard_mode(False)
         self.dashboard.stop()
-        cprint("\n\n⚠️  Shutdown signal received...", "yellow")
-        self.stop()
+        cprint("\n\n⚠️  Shutdown signal received... (Ctrl+C again to force quit)", "yellow")
+        self.is_running = False
+        # Main loop will exit and call stop() to cancel orders, etc.
     
     def start(self):
         """Start the trading bot."""
@@ -484,22 +491,22 @@ class PolymarketBot:
                 n_executed = 0
                 block_reason = ""
                 for sig in signals:
-                    # Use adaptive order sizing
+                    is_sell = sig.signal_type == SignalType.SELL
                     trade_value = sig.size * sig.price
                     adaptive_size = self.risk_manager.get_adaptive_order_size(trade_value)
                     
-                    # Check risk limits with adaptive-sized trade
-                    can_open, reason = self.risk_manager.can_open_position(
-                        sig.token_id,
-                        adaptive_size,
-                        sig.price,
-                        strategy=strategy.name,
-                    )
-                    
-                    if not can_open:
-                        n_blocked += 1
-                        block_reason = reason
-                        continue
+                    # For BUY: check risk limits. For SELL (position close): skip
+                    if not is_sell:
+                        can_open, reason = self.risk_manager.can_open_position(
+                            sig.token_id,
+                            adaptive_size,
+                            sig.price,
+                            strategy=strategy.name,
+                        )
+                        if not can_open:
+                            n_blocked += 1
+                            block_reason = reason
+                            continue
                     
                     # Execute via strategy
                     results = strategy.execute([sig], self.order_manager)
@@ -519,7 +526,7 @@ class PolymarketBot:
                                 size=sig.size,
                                 pnl=0.0,  # P&L tracked on exit
                                 fees=fee_est,
-                                is_exit=False,
+                                is_exit=is_sell,
                             )
                 
                 # Log summary: executed trades always, risk blocks throttled
