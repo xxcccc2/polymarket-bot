@@ -16,7 +16,12 @@ PUBLIC_CONFIG_FILE = os.getenv(
 )
 if Path(PUBLIC_CONFIG_FILE).exists():
     load_dotenv(dotenv_path=PUBLIC_CONFIG_FILE, override=False)
-load_dotenv(dotenv_path=PROJECT_ROOT / '.env', override=True)
+elif os.getenv("BOT_PUBLIC_CONFIG_FILE"):
+    # User explicitly pointed to a shared config path that doesn't exist.
+    # Log loudly to avoid silent fallback to defaults.
+    print(f"⚠️  BOT_PUBLIC_CONFIG_FILE not found: {PUBLIC_CONFIG_FILE}")
+# Keep shell/exported vars as highest priority (important for BOT_WALLET_ID=... runs).
+load_dotenv(dotenv_path=PROJECT_ROOT / '.env', override=False)
 
 # =============================================================================
 # POLYMARKET API SETTINGS
@@ -64,12 +69,16 @@ if BOT_WALLET_ID:
     _suffix = BOT_WALLET_ID.upper()
     PRIVATE_KEY = os.getenv(f"POLYMARKET_PRIVATE_KEY_{_suffix}", "") or os.getenv("POLYMARKET_PRIVATE_KEY", "")
     PROXY_ADDRESS = os.getenv(f"POLYMARKET_PROXY_ADDRESS_{_suffix}", "") or os.getenv("POLYMARKET_PROXY_ADDRESS", "")
+    SIGNATURE_TYPE = int(
+        os.getenv(f"SIGNATURE_TYPE_{_suffix}", os.getenv("SIGNATURE_TYPE", "2"))
+    )
 else:
     PRIVATE_KEY = os.getenv("POLYMARKET_PRIVATE_KEY", "")
     PROXY_ADDRESS = os.getenv("POLYMARKET_PROXY_ADDRESS", "")
+    SIGNATURE_TYPE = int(os.getenv("SIGNATURE_TYPE", "2"))
 
-# Signature type: 1 = Email/Magic, 2 = Browser wallet (MetaMask, Binance, etc.)
-SIGNATURE_TYPE = 2
+# Signature types (per Polymarket docs):
+# 0 = EOA, 1 = POLY_PROXY (email/magic), 2 = GNOSIS_SAFE
 
 # =============================================================================
 # TRADING PARAMETERS
