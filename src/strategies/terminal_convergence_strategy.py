@@ -117,6 +117,7 @@ class TerminalConvergenceStrategy(BaseStrategy):
         3. Use time-to-expiry to modulate confidence (closer = more certain)
         """
         signals = []
+        self._last_scan_status = "—"
 
         if not self.binance_feed:
             return signals
@@ -260,6 +261,9 @@ class TerminalConvergenceStrategy(BaseStrategy):
             self.signals_generated += 1
             self.last_signal_time[sig.token_id] = time.time()
             cprint(f"  🏁 {sig}", "green")
+
+        # Status for TUI (always visible)
+        self._last_scan_status = f"{n_eligible} in window"
 
         # Diagnostic summary — throttled to avoid flooding the Activity Log
         if not signals and n_eligible > 0:
@@ -445,5 +449,6 @@ class TerminalConvergenceStrategy(BaseStrategy):
             "convergence_window_s": self.convergence_window_s,
             "min_edge_cents": self.min_edge_cents,
             "min_certainty": self.min_certainty,
+            "status": getattr(self, "_last_scan_status", "—"),
         })
         return state

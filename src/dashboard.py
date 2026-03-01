@@ -72,6 +72,7 @@ class StrategyRow:
     pnl: float = 0.0
     healthy: bool = True
     last_signal: str = ""  # human-readable time or "—"
+    status: str = ""  # e.g. "0 in window", "2 groups" — visible in TUI
 
 
 @dataclass
@@ -247,6 +248,7 @@ class Dashboard:
         table.add_column("Sig", justify="right", ratio=1)
         table.add_column("Trades", justify="right", ratio=1)
         table.add_column("", justify="center", width=3)
+        table.add_column("Status", justify="left", ratio=2)
 
         for r in rows:
             health = "✅" if r.healthy else "⏸️"
@@ -255,6 +257,7 @@ class Dashboard:
                 str(r.signals),
                 str(r.trades),
                 health,
+                r.status or "—",
             )
 
         return Panel(table, title="📊 Strategies", border_style="cyan", box=box.ROUNDED)

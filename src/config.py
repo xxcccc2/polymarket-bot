@@ -143,9 +143,12 @@ ENABLE_BTC_5MIN = os.getenv("ENABLE_BTC_5MIN", "true").lower() == "true"
 MAX_HOURS_TO_EXPIRY = float(os.getenv("MAX_HOURS_TO_EXPIRY", "1"))
 
 # Keywords to identify short-term BTC markets on Polymarket
-# Actual market titles: "Bitcoin Up or Down - 5 min", "- 15 min", "- 1 hour"
+# Event slugs: btc-updown-5m-*, sol-updown-15m-*, ethereum-up-or-down-*
+# Market titles: "Bitcoin Up or Down - 5 min", "- 15 min", "- 1 hour"
 BTC_5MIN_KEYWORDS = [
-    # Exact Polymarket phrasing
+    # Event slug patterns (from /events): btc-updown-5m, ethereum-up-or-down
+    "updown", "up-or-down", "5m", "15m", "1h",
+    # Exact Polymarket phrasing (from market titles)
     "up or down - 5 min",
     "up or down - 15 min",
     "up or down - 1 hour",
@@ -153,7 +156,7 @@ BTC_5MIN_KEYWORDS = [
     # Fallback patterns
     "5 min", "5-min", "5min", "5-minute", "5 minute",
     "15 min", "15-min", "15min",
-    "1 hour", "1h",
+    "1 hour",
     "up or down",
 ]
 

@@ -183,6 +183,20 @@ class CombinatorialArbStrategy(BaseStrategy):
                 v_signals = self._create_signals(violation, group, now)
                 signals.extend(v_signals)
 
+        # Status for TUI (always visible)
+        n_parsed = sum(len(g) for g in groups.values())
+        n_groups_multi = sum(1 for g in groups.values() if len(g) >= 2)
+        self._last_scan_status = f"{n_parsed} thresh, {len(groups)} grp, {n_groups_multi}≥2"
+
+        # Periodic diagnostic (throttled to avoid log spam)
+        if not hasattr(self, "_last_combo_diag") or now - self._last_combo_diag > 300:
+            self._last_combo_diag = now
+            cprint(
+                f"   🧩 Combo arb: {n_parsed} threshold markets, {len(groups)} groups, "
+                f"{n_groups_multi} with ≥2 (violations: {len(signals)})",
+                "cyan",
+            )
+
         return signals
 
     def execute(self, signals: List[Signal], order_manager) -> List[Dict]:
@@ -425,4 +439,5 @@ class CombinatorialArbStrategy(BaseStrategy):
         state["parsed_markets"] = len(self._parsed_cache)
         state["valid_parsed"] = sum(1 for v in self._parsed_cache.values() if v is not None)
         state["active_cooldowns"] = len(self._pair_cooldowns)
+        state["status"] = getattr(self, "_last_scan_status", "—")
         return state

@@ -709,6 +709,7 @@ class PolymarketBot:
                 pnl=state['pnl'] if self.analytics_enabled else 0.0,
                 healthy=healthy,
                 last_signal=last_ts,
+                status=state.get('status', ''),
             ))
         
         # Portfolio snapshot
@@ -935,6 +936,14 @@ class PolymarketBot:
         cprint(f"      With orderbook data: {with_orderbook}", "white")
         cprint(f"      With recent trades: {with_trades}", "white")
 
+        # Combinatorial arb: threshold markets (above/below + numeric)
+        threshold_count = sum(
+            1 for md in market_data_list
+            if any(kw in (md.question or "").lower() for kw in ["above", "below", "over", "under", "exceed", "reach"])
+            and any(kw in (md.question or "").lower() for kw in ["bitcoin", "btc", "ethereum", "eth", "solana", "sol"])
+        )
+        cprint(f"      Threshold markets (combo_arb): {threshold_count}", "white")
+
         if btc_5min_count == 0:
             cprint(f"      ⚠️  No BTC short-term markets matched!", "yellow")
             cprint(f"      Sample markets (first 5):", "yellow")
@@ -963,7 +972,7 @@ class PolymarketBot:
                     # Only extract crypto up/down event sub-markets
                     is_crypto_event = any(
                         kw in text for kw in ["bitcoin", "btc", "ethereum", "eth",
-                                              "solana", "sol", "xrp", "up or down"]
+                                              "solana", "sol", "xrp", "up or down", "updown"]
                     )
                     if not is_crypto_event:
                         continue
