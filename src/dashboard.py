@@ -3,7 +3,7 @@ Live TUI Dashboard for Polymarket Trading Bot.
 
 Uses ``rich`` to render a persistent, auto-refreshing terminal UI.
 Static info (config, strategy list) stays fixed; mutable data
-(BTC price, signals, orders, P&L) updates in-place every scan cycle.
+(BTC price, signals, orders, balance) updates in-place every scan cycle.
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ from rich import box
 _LOG_BUFFER: Deque[str] = deque(maxlen=80)
 _LOG_LOCK = threading.Lock()
 
-MAX_LOG_LINES = 20  # visible in the Activity panel
+MAX_LOG_LINES = 40  # visible in the Activity panel
 
 
 def log(msg: str) -> None:
@@ -40,10 +40,14 @@ def log(msg: str) -> None:
         _LOG_BUFFER.append(f"[dim]{ts}[/dim] {msg}")
 
 
-def get_log_lines(n: int = MAX_LOG_LINES) -> List[str]:
-    """Return the last *n* log lines (newest last)."""
+def get_log_lines(n: int = MAX_LOG_LINES, filter_keywords: Optional[List[str]] = None) -> List[str]:
+    """Return the last *n* log lines (newest last). If filter_keywords is set, only include lines containing any keyword."""
     with _LOG_LOCK:
-        return list(_LOG_BUFFER)[-n:]
+        lines = list(_LOG_BUFFER)
+    if filter_keywords:
+        kw_lower = [k.lower() for k in filter_keywords if k]
+        lines = [ln for ln in lines if any(kw in ln.lower() for kw in kw_lower)]
+    return lines[-n:]
 
 
 # ---------------------------------------------------------------------------
@@ -84,6 +88,12 @@ class PortfolioSnapshot:
     cancelled: int = 0
     fill_rate: float = 0.0
     throttle: float = 1.0
+    # Staleness & sync
+    balance_age_seconds: float = 0.0
+    balance_stale_block_buys: bool = False
+    balance_stale_max_seconds: float = 240.0
+    last_balance_sync_ts: float = 0.0
+    last_positions_sync_ts: float = 0.0
 
 
 @dataclass
@@ -198,16 +208,31 @@ class Dashboard:
         session_pnl = p.balance - p.start_balance
         session_style = "green" if session_pnl >= 0 else "red"
 
-        throttle_txt = ""
-        if p.throttle < 1.0:
-            throttle_txt = f"\n⚠️  [yellow]Throttle: {p.throttle*100:.0f}%[/]"
+        lines = [
+            f"Balance  [bold]${p.balance:,.2f}[/] ([{session_style}]{session_pnl:+.2f}[/])",
+            f"Orders   {p.active_orders}/{p.max_orders}  |  Fill {p.filled} ({p.fill_rate:.0f}%)",
+        ]
 
-        body = Text.from_markup(
-            f"Balance  [bold]${p.balance:,.2f}[/]"
-            f" ([{session_style}]{session_pnl:+.2f}[/])\n"
-            f"Exposure ${p.exposure:,.2f} ({p.exposure_pct:.1f}%)"
-            f"{throttle_txt}"
-        )
+        if p.throttle < 1.0:
+            lines.append(f"⚠️  [yellow]Throttle: {p.throttle*100:.0f}%[/]")
+
+        # Balance staleness warning
+        if p.balance_stale_block_buys and p.last_balance_sync_ts > 0:
+            age = p.balance_age_seconds
+            if age > p.balance_stale_max_seconds:
+                lines.append(f"⚠️  [red]Balance stale {int(age)}s[/]")
+
+        # Last sync times
+        sync_parts = []
+        if p.last_balance_sync_ts > 0:
+            sync_parts.append(f"bal {int(p.balance_age_seconds)}s ago")
+        if p.last_positions_sync_ts > 0:
+            pos_age = int(time.time() - p.last_positions_sync_ts)
+            sync_parts.append(f"pos {pos_age}s ago")
+        if sync_parts:
+            lines.append(f"[dim]Sync: {', '.join(sync_parts)}[/]")
+
+        body = Text.from_markup("\n".join(lines))
         return Panel(body, title="💰 Portfolio", border_style="green", box=box.ROUNDED)
 
     @staticmethod
@@ -221,30 +246,27 @@ class Dashboard:
         table.add_column("Strategy", style="bold", ratio=3)
         table.add_column("Sig", justify="right", ratio=1)
         table.add_column("Trades", justify="right", ratio=1)
-        table.add_column("P&L", justify="right", ratio=1)
         table.add_column("", justify="center", width=3)
-        table.add_column("Last", justify="right", ratio=1)
 
         for r in rows:
-            pnl_str = f"${r.pnl:+.2f}"
-            pnl_style = "green" if r.pnl >= 0 else "red"
             health = "✅" if r.healthy else "⏸️"
             table.add_row(
                 r.name,
                 str(r.signals),
                 str(r.trades),
-                f"[{pnl_style}]{pnl_str}[/]",
                 health,
-                r.last_signal or "—",
             )
 
         return Panel(table, title="📊 Strategies", border_style="cyan", box=box.ROUNDED)
 
     @staticmethod
     def _render_logs() -> Panel:
-        lines = get_log_lines(MAX_LOG_LINES)
+        from .config import DASHBOARD_LOG_FILTER
+        filter_kw = DASHBOARD_LOG_FILTER if DASHBOARD_LOG_FILTER else None
+        lines = get_log_lines(MAX_LOG_LINES, filter_keywords=filter_kw)
         if not lines:
-            body = Text("  Waiting for activity…", style="dim")
+            filter_hint = f" (filter: {', '.join(DASHBOARD_LOG_FILTER)})" if DASHBOARD_LOG_FILTER else ""
+            body = Text(f"  Waiting for activity…{filter_hint}", style="dim")
         else:
             body = Text.from_markup("\n".join(lines))
         return Panel(body, title="📝 Activity Log", border_style="bright_black", box=box.ROUNDED)

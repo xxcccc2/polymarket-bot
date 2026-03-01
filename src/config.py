@@ -320,6 +320,9 @@ BALANCE_STALE_MAX_SECONDS = int(os.getenv("BALANCE_STALE_MAX_SECONDS", "240"))
 # Disable analytics/P&L tracking to reduce runtime overhead
 ENABLE_STRATEGY_ANALYTICS = os.getenv("ENABLE_STRATEGY_ANALYTICS", "true").lower() == "true"
 
+# TUI: filter Activity log by keywords (comma-separated). Empty = show all.
+DASHBOARD_LOG_FILTER = [k.strip() for k in os.getenv("DASHBOARD_LOG_FILTER", "").split(",") if k.strip()]
+
 # =============================================================================
 # RATE LIMITS (Polymarket CLOB)
 # =============================================================================

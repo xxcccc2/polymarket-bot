@@ -215,6 +215,7 @@ class PolymarketBot:
         self.market_data_cache: Dict[str, MarketData] = {}
         self._scan_count = 0
         self._last_balance_refresh_success_ts = 0.0
+        self._last_positions_sync_ts = 0.0
         
         # TUI dashboard
         self.dashboard = Dashboard()
@@ -453,6 +454,7 @@ class PolymarketBot:
                         if positions:
                             self.risk_manager.sync_positions_from_api(positions)
                         last_sync = time.time()
+                        self._last_positions_sync_ts = time.time()
                     except Exception as e:
                         cprint(f"   ⚠️  sync error: {e}", "yellow")
                 
@@ -726,6 +728,7 @@ class PolymarketBot:
         
         total_exp = rm.get_total_exposure()
         rm_status = rm.get_status()
+        balance_age = time.time() - self._last_balance_refresh_success_ts if self._last_balance_refresh_success_ts > 0 else 0.0
         portfolio = PortfolioSnapshot(
             balance=rm.current_balance,
             start_balance=rm.starting_balance,
@@ -739,6 +742,11 @@ class PolymarketBot:
             cancelled=om_cancelled,
             fill_rate=om_fill_rate,
             throttle=rm.get_throttle_factor() if rm.adaptive_enabled else 1.0,
+            balance_age_seconds=balance_age,
+            balance_stale_block_buys=BALANCE_STALE_BLOCK_BUYS,
+            balance_stale_max_seconds=float(BALANCE_STALE_MAX_SECONDS),
+            last_balance_sync_ts=self._last_balance_refresh_success_ts,
+            last_positions_sync_ts=self._last_positions_sync_ts,
         )
         
         state = DashboardState(
