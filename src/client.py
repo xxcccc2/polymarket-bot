@@ -7,7 +7,9 @@ rate limiting, and convenience methods.
 
 import time
 import random
+import threading
 import concurrent.futures
+import json
 from typing import Dict, List, Optional, Any
 from datetime import datetime
 from .logging_utils import cprint
@@ -25,6 +27,19 @@ def _call_with_timeout(fn, timeout_s: float = 15, default=None):
     except Exception:
         return default
 
+
+def _call_with_timeout_strict(fn, timeout_s: float = 15, timeout_default=None):
+    """
+    Run *fn* in a thread.
+    - returns timeout_default on timeout
+    - re-raises underlying exceptions (needed for auth refresh paths)
+    """
+    future = _TIMEOUT_POOL.submit(fn)
+    try:
+        return future.result(timeout=timeout_s)
+    except concurrent.futures.TimeoutError:
+        return timeout_default
+
 from .config import (
     CLOB_HOST,
     GAMMA_HOST,
@@ -40,8 +55,13 @@ from .config import (
     RETRY_MAX_DELAY_SECONDS,
     AUTO_ALLOWANCE_REFRESH_ENABLED,
     ALLOWANCE_REFRESH_SECONDS,
+    ALLOWANCE_DIAGNOSTICS_ENABLED,
+    CLOB_HEARTBEAT_ENABLED,
+    CLOB_HEARTBEAT_INTERVAL_SECONDS,
+    TRADE_FETCH_TIMEOUT_SECONDS,
+    BALANCE_FETCH_TIMEOUT_SECONDS,
 )
-from .data_client import get_balance_total
+from .data_client import get_balance_total, get_trades_by_user, get_positions
 
 # Will be imported when py-clob-client is installed
 try:
@@ -49,10 +69,15 @@ try:
     from py_clob_client.clob_types import (
         OrderArgs,
         OrderType,
+        PostOrdersArgs,
         BalanceAllowanceParams,
         AssetType,
+        TradeParams,
     )
     from py_clob_client.order_builder.constants import BUY, SELL
+    from py_clob_client.headers.headers import create_level_2_headers
+    from py_clob_client.http_helpers.helpers import post as clob_post
+    from py_clob_client.clob_types import RequestArgs
     CLOB_AVAILABLE = True
 except ImportError:
     CLOB_AVAILABLE = False
@@ -77,6 +102,10 @@ class PolymarketClient:
         self.orders_this_second = 0
         self.api_creds_set = False
         self.last_allowance_refresh = 0.0
+        self.last_allowance_diag_log = 0.0
+        self._heartbeat_thread: Optional[threading.Thread] = None
+        self._heartbeat_running = False
+        self._heartbeat_warned_unavailable = False
         
         # Track rate limits
         self.min_order_interval = 1.0 / ORDER_RATE_LIMIT_SUSTAINED
@@ -91,6 +120,58 @@ class PolymarketClient:
         msg = (error_msg or "").lower()
         return "unauthorized" in msg or "invalid api key" in msg or "status_code=401" in msg
 
+    @staticmethod
+    def _extract_status_code(error_msg: str) -> Optional[int]:
+        msg = error_msg or ""
+        marker = "status_code="
+        idx = msg.find(marker)
+        if idx < 0:
+            return None
+        num = []
+        for ch in msg[idx + len(marker):]:
+            if ch.isdigit():
+                num.append(ch)
+            else:
+                break
+        if not num:
+            return None
+        try:
+            return int("".join(num))
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _format_error(exc: Exception) -> str:
+        """Extract useful API error details from wrapped exceptions."""
+        status_code = getattr(exc, "status_code", None)
+        error_msg = (
+            getattr(exc, "error_msg", None)
+            or getattr(exc, "error_message", None)
+            or getattr(exc, "msg", None)
+        )
+        if error_msg is None and getattr(exc, "args", None):
+            error_msg = exc.args[0] if len(exc.args) == 1 else exc.args
+
+        if isinstance(error_msg, (dict, list)):
+            try:
+                error_msg = json.dumps(error_msg, separators=(",", ":"), ensure_ascii=False)
+            except Exception:
+                error_msg = str(error_msg)
+        elif error_msg is not None:
+            error_msg = str(error_msg)
+
+        base_name = exc.__class__.__name__
+        if status_code is not None or error_msg:
+            parts = [base_name]
+            if status_code is not None:
+                parts.append(f"status_code={status_code}")
+            if error_msg:
+                parts.append(f"error={error_msg}")
+            return " | ".join(parts)
+
+        raw = str(exc)
+        return raw if raw and raw != base_name else base_name
+
     def _refresh_api_creds(self, reason: str = "auth-retry") -> bool:
         """Re-derive L2 API credentials after 401/invalid-key responses."""
         if not self.client or PAPER_TRADING:
@@ -103,6 +184,61 @@ class PolymarketClient:
         except Exception as exc:
             cprint(f"⚠️  API credential refresh failed ({reason}): {exc}", "yellow")
             return False
+
+    def _start_heartbeat_loop(self) -> None:
+        """Start periodic CLOB heartbeat loop when supported by SDK."""
+        if PAPER_TRADING or not CLOB_HEARTBEAT_ENABLED or self._heartbeat_running:
+            return
+
+        self._heartbeat_running = True
+
+        def _loop():
+            while self._heartbeat_running and self.is_connected and self.client:
+                try:
+                    post_heartbeat = getattr(self.client, "post_heartbeat", None)
+                    if callable(post_heartbeat):
+                        self._retry_call(post_heartbeat, "Post heartbeat")
+                    else:
+                        self._retry_call(self._post_heartbeat_fallback, "Post heartbeat")
+                except Exception as exc:
+                    msg = str(exc)
+                    if self._is_auth_error(msg):
+                        self._refresh_api_creds(reason="heartbeat")
+                    elif "heartbeat endpoint unavailable" in msg.lower():
+                        self._heartbeat_running = False
+                        return
+                    else:
+                        cprint(f"⚠️  Heartbeat failed: {exc}", "yellow")
+                time.sleep(max(2.0, CLOB_HEARTBEAT_INTERVAL_SECONDS))
+
+        self._heartbeat_thread = threading.Thread(target=_loop, daemon=True, name="clob-heartbeat")
+        self._heartbeat_thread.start()
+
+    def stop_background_tasks(self) -> None:
+        """Stop client background tasks (heartbeat loop)."""
+        self._heartbeat_running = False
+
+    def _post_heartbeat_fallback(self) -> Dict[str, Any]:
+        """
+        Fallback heartbeat call for SDK versions missing post_heartbeat().
+        Tries both /heartbeats and /heartbeat paths for compatibility.
+        """
+        self.client.assert_level_2_auth()
+        body: Dict[str, Any] = {}
+        errors = []
+        for path in ("/heartbeats", "/heartbeat"):
+            try:
+                request_args = RequestArgs(method="POST", request_path=path, body=body)
+                headers = create_level_2_headers(self.client.signer, self.client.creds, request_args)
+                return clob_post(f"{self.client.host}{path}", headers=headers, data=body)
+            except Exception as exc:
+                errors.append(str(exc))
+                continue
+
+        if not self._heartbeat_warned_unavailable:
+            cprint("⚠️  Heartbeat endpoint unavailable on current API/SDK combination", "yellow")
+            self._heartbeat_warned_unavailable = True
+        raise Exception("; ".join(errors) if errors else "heartbeat endpoint unavailable")
 
     def _refresh_allowance(self, force: bool = False, reason: str = "periodic") -> bool:
         """
@@ -131,10 +267,42 @@ class PolymarketClient:
 
             self.last_allowance_refresh = now
             cprint(f"🔐 Refreshed CLOB allowance ({reason})", "cyan")
+            if ALLOWANCE_DIAGNOSTICS_ENABLED:
+                self._log_allowance_diagnostics(f"after-refresh:{reason}", throttle_seconds=10)
             return True
         except Exception as exc:
             cprint(f"⚠️  Allowance refresh failed ({reason}): {exc}", "yellow")
             return False
+
+    def _log_allowance_diagnostics(self, stage: str, throttle_seconds: int = 30) -> None:
+        """Log collateral balance/allowance snapshot for debugging spendability issues."""
+        if not ALLOWANCE_DIAGNOSTICS_ENABLED:
+            return
+        if not self.client or not self.is_connected or not self.api_creds_set:
+            return
+        now = time.time()
+        if throttle_seconds > 0 and (now - self.last_allowance_diag_log) < throttle_seconds:
+            return
+        self.last_allowance_diag_log = now
+        try:
+            params = BalanceAllowanceParams(
+                asset_type=AssetType.COLLATERAL,
+                signature_type=SIGNATURE_TYPE,
+            )
+            snapshot = self.client.get_balance_allowance(params)
+            if isinstance(snapshot, dict):
+                fields = []
+                for key in ("balance", "allowance", "available", "availableBalance", "available_balance"):
+                    if key in snapshot:
+                        fields.append(f"{key}={snapshot.get(key)}")
+                if fields:
+                    cprint(f"🧪 Allowance diag [{stage}]: " + ", ".join(fields), "dark_grey")
+                else:
+                    cprint(f"🧪 Allowance diag [{stage}]: {json.dumps(snapshot, separators=(',', ':'))[:240]}", "dark_grey")
+            else:
+                cprint(f"🧪 Allowance diag [{stage}]: {str(snapshot)[:240]}", "dark_grey")
+        except Exception as exc:
+            cprint(f"⚠️  Allowance diag failed [{stage}]: {self._format_error(exc)}", "yellow")
         
     def connect(self) -> bool:
         """
@@ -169,6 +337,7 @@ class PolymarketClient:
             self._refresh_allowance(force=True, reason="startup")
             
             self.is_connected = True
+            self._start_heartbeat_loop()
             cprint("✅ Connected to Polymarket CLOB", "green")
             
             return True
@@ -193,20 +362,34 @@ class PolymarketClient:
         """Retry wrapper with exponential backoff."""
         attempt = 0
         last_error: Optional[Exception] = None
-        while attempt < RETRY_MAX_ATTEMPTS:
+        max_attempts = RETRY_MAX_ATTEMPTS
+        while attempt < max_attempts:
             try:
                 return func()
             except Exception as exc:
                 last_error = exc
                 attempt += 1
-                if attempt >= RETRY_MAX_ATTEMPTS:
+                msg = self._format_error(exc)
+                status = getattr(exc, "status_code", None) or self._extract_status_code(msg)
+                msg_lower = msg.lower()
+
+                is_rate_limited = status == 429 or "too many requests" in msg_lower
+                is_engine_restart = status == 425 or "too early" in msg_lower or "matching engine is restarting" in msg_lower
+                transient = is_rate_limited or is_engine_restart
+                if transient:
+                    max_attempts = max(max_attempts, RETRY_MAX_ATTEMPTS + 2)
+
+                if attempt >= max_attempts:
                     break
+
                 delay = min(
                     RETRY_MAX_DELAY_SECONDS,
                     RETRY_BASE_DELAY_SECONDS * (2 ** (attempt - 1)),
                 )
+                if transient:
+                    delay = max(1.0, delay * 2)
                 jitter = delay * 0.1 * random.random()
-                cprint(f"⚠️  {action} failed (attempt {attempt}/{RETRY_MAX_ATTEMPTS}): {exc}", "yellow")
+                cprint(f"⚠️  {action} failed (attempt {attempt}/{max_attempts}): {msg}", "yellow")
                 time.sleep(delay + jitter)
         if last_error:
             raise last_error
@@ -468,11 +651,13 @@ class PolymarketClient:
             }
             
         except Exception as e:
-            error_msg = str(e)
+            error_msg = self._format_error(e)
             if self._is_allowance_error(error_msg):
+                self._log_allowance_diagnostics("order-error:before-refresh", throttle_seconds=10)
                 cprint("🔁 Allowance error detected, forcing allowance refresh and retrying once...", "yellow")
                 refreshed = self._refresh_allowance(force=True, reason="order-error")
                 if refreshed:
+                    self._log_allowance_diagnostics("order-error:after-refresh", throttle_seconds=0)
                     try:
                         self._rate_limit()
                         order_args = OrderArgs(
@@ -497,13 +682,108 @@ class PolymarketClient:
                             "result": result,
                         }
                     except Exception as retry_exc:
-                        error_msg = str(retry_exc)
+                        error_msg = self._format_error(retry_exc)
             cprint(f"❌ Order failed: {error_msg}", "red")
             
             return {
                 "success": False,
                 "error": error_msg
             }
+
+    def place_orders_batch(self, orders: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Place multiple limit orders in a single API request when possible.
+
+        Args:
+            orders: List of order dicts with token_id, side, price, size, order_type
+
+        Returns:
+            Per-order result list aligned with input order list.
+        """
+        if not self.is_connected:
+            return [{"success": False, "error": "Not connected"} for _ in orders]
+        if not orders:
+            return []
+
+        # Paper trading mode
+        if PAPER_TRADING:
+            now_ms = int(time.time() * 1000)
+            results = []
+            for idx, order in enumerate(orders):
+                results.append(
+                    {
+                        "success": True,
+                        "order_id": f"paper_batch_{now_ms}_{idx}",
+                        "paper_trade": True,
+                        "side": (order.get("side") or "").upper(),
+                        "price": float(order.get("price", 0)),
+                        "size": float(order.get("size", 0)),
+                    }
+                )
+            return results
+
+        def _submit_batch() -> List[Dict[str, Any]]:
+            self._refresh_allowance(force=False, reason="pre-batch-order")
+            self._rate_limit()
+
+            batch_args: List[PostOrdersArgs] = []
+            for order in orders:
+                side = (order.get("side") or "").upper()
+                order_args = OrderArgs(
+                    price=float(order["price"]),
+                    size=float(order["size"]),
+                    side=BUY if side == "BUY" else SELL,
+                    token_id=order["token_id"],
+                )
+                signed_order = self._retry_call(
+                    lambda oa=order_args: self.client.create_order(oa),
+                    "Create batch order",
+                )
+                ot = OrderType.GTC if order.get("order_type", "GTC") == "GTC" else OrderType.FOK
+                batch_args.append(PostOrdersArgs(order=signed_order, orderType=ot))
+
+            posted = self._retry_call(
+                lambda: self.client.post_orders(batch_args),
+                "Post batch orders",
+            )
+
+            results: List[Dict[str, Any]] = []
+            posted_items = posted if isinstance(posted, list) else []
+            for idx, req in enumerate(orders):
+                item = posted_items[idx] if idx < len(posted_items) else {}
+                order_id = (
+                    (item.get("orderID") or item.get("id") or item.get("order_id"))
+                    if isinstance(item, dict)
+                    else None
+                )
+                item_error = item.get("error") if isinstance(item, dict) else None
+                if item_error:
+                    results.append({"success": False, "error": str(item_error)})
+                else:
+                    results.append(
+                        {
+                            "success": True,
+                            "order_id": order_id or f"batch_{int(time.time()*1000)}_{idx}",
+                            "result": item if isinstance(item, dict) else {},
+                        }
+                    )
+            return results
+
+        try:
+            return _submit_batch()
+        except Exception as exc:
+            error_msg = self._format_error(exc)
+            if self._is_allowance_error(error_msg):
+                cprint(
+                    "🔁 Batch order allowance error detected, forcing allowance refresh and retrying once...",
+                    "yellow",
+                )
+                if self._refresh_allowance(force=True, reason="batch-order-error"):
+                    try:
+                        return _submit_batch()
+                    except Exception as retry_exc:
+                        error_msg = self._format_error(retry_exc)
+            return [{"success": False, "error": error_msg} for _ in orders]
     
     def cancel_order(self, order_id: str) -> Dict:
         """
@@ -559,44 +839,99 @@ class PolymarketClient:
             return orders if orders else []
             
         except Exception as e:
-            error_msg = str(e)
+            error_msg = self._format_error(e)
             if self._is_auth_error(error_msg) and self._refresh_api_creds(reason="get_open_orders"):
                 try:
                     orders = self._retry_call(lambda: self.client.get_orders(), "Fetch open orders")
                     return orders if orders else []
                 except Exception as retry_exc:
-                    error_msg = str(retry_exc)
+                    error_msg = self._format_error(retry_exc)
             cprint(f"❌ Failed to fetch orders: {error_msg}", "red")
             return []
     
-    def get_trades(self, limit: int = 100) -> List[Dict]:
-        """Get recent trades (bounded to 15s timeout)."""
+    def get_trades(self, limit: int = 100, timeout_s: Optional[float] = None) -> List[Dict]:
+        """Get recent trades for our account (bounded timeout to protect scan loop).
+        
+        Fetches from BOTH CLOB (maker fills) and Data API (maker + taker fills), then merges
+        and dedupes. This ensures we never miss taker fills when we take liquidity.
+        """
         if not self.is_connected:
+            return []
+        effective_timeout = timeout_s if (timeout_s and timeout_s > 0) else TRADE_FETCH_TIMEOUT_SECONDS
+        clob_trades: List[Dict] = []
+        data_trades: List[Dict] = []
+
+        def _fetch_clob():
+            params = None
+            if not PAPER_TRADING and PROXY_ADDRESS and CLOB_AVAILABLE:
+                params = TradeParams(maker_address=PROXY_ADDRESS.lower())
+            return self._retry_call(lambda: self.client.get_trades(params), "Fetch trades") or []
+
+        def _fetch_data():
+            if not PAPER_TRADING and PROXY_ADDRESS:
+                return get_trades_by_user(PROXY_ADDRESS, limit=min(limit, 100), taker_only=False)
             return []
 
         try:
-            trades = _call_with_timeout(
-                lambda: self._retry_call(lambda: self.client.get_trades(), "Fetch trades"),
-                timeout_s=15,
-                default=[],
-            )
-            return trades[:limit] if trades else []
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+                f_clob = ex.submit(
+                    lambda: _call_with_timeout_strict(_fetch_clob, timeout_s=effective_timeout / 2, timeout_default=[])
+                )
+                f_data = ex.submit(_fetch_data)
+                try:
+                    clob_trades = f_clob.result(timeout=effective_timeout)
+                except Exception:
+                    pass
+                try:
+                    data_trades = f_data.result(timeout=effective_timeout)
+                except Exception:
+                    pass
+
+            # Merge and dedupe by trade id (prefer CLOB format when both have same trade)
+            seen: Dict[str, Dict] = {}
+            for t in (clob_trades or []) + (data_trades or []):
+                tid = t.get("id") or t.get("trade_id")
+                if not tid:
+                    aid = t.get("asset_id") or t.get("token_id") or t.get("asset")
+                    ts = t.get("timestamp")
+                    if aid is not None and ts is not None:
+                        tid = f"{aid}_{t.get('side')}_{t.get('price')}_{t.get('size')}_{ts}"
+                if tid and tid not in seen:
+                    seen[tid] = t
+            trades = list(seen.values())
+            # Sort by timestamp descending (newest first)
+            def _ts(t):
+                ts = t.get("timestamp") or t.get("created_at") or 0
+                return float(ts) if ts else 0
+            trades.sort(key=_ts, reverse=True)
+            return trades[:limit]
 
         except Exception as e:
-            error_msg = str(e)
+            error_msg = self._format_error(e)
             if self._is_auth_error(error_msg) and self._refresh_api_creds(reason="get_trades"):
                 try:
-                    trades = _call_with_timeout(
-                        lambda: self._retry_call(lambda: self.client.get_trades(), "Fetch trades"),
-                        timeout_s=15,
-                        default=[],
-                    )
-                    return trades[:limit] if trades else []
+                    clob_trades = _call_with_timeout_strict(_fetch_clob, timeout_s=effective_timeout, timeout_default=[])
+                    data_trades = get_trades_by_user(PROXY_ADDRESS, limit=min(limit, 100), taker_only=False) if PROXY_ADDRESS else []
+                    seen = {}
+                    for t in (clob_trades or []) + (data_trades or []):
+                        tid = t.get("id") or t.get("trade_id") or ""
+                        if tid and tid not in seen:
+                            seen[tid] = t
+                    return list(seen.values())[:limit]
                 except Exception as retry_exc:
-                    error_msg = str(retry_exc)
+                    error_msg = self._format_error(retry_exc)
             cprint(f"❌ Failed to fetch trades: {error_msg}", "red")
             return []
-    
+
+    def get_positions(self, limit: int = 100) -> List[Dict]:
+        """Get current positions from Data API (ground truth for exposure)."""
+        if PAPER_TRADING or not PROXY_ADDRESS:
+            return []
+        try:
+            return get_positions(PROXY_ADDRESS, limit=limit)
+        except Exception:
+            return []
+
     def get_balance(self) -> Optional[float]:
         """
         Get USDC balance.
@@ -669,7 +1004,7 @@ class PolymarketClient:
                     pass
             return None
 
-        return _call_with_timeout(_try_methods, timeout_s=15, default=None)
+        return _call_with_timeout(_try_methods, timeout_s=BALANCE_FETCH_TIMEOUT_SECONDS, default=None)
 
 
 # Convenience function for quick client creation

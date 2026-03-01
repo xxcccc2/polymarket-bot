@@ -311,7 +311,7 @@ class WebSocketFeed:
                         self.ws.send(json.dumps({"type": "ping"}))
                 except:
                     break
-                time.sleep(30)
+                time.sleep(10)
         
         thread = threading.Thread(target=heartbeat, daemon=True)
         thread.start()

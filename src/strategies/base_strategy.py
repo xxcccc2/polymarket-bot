@@ -90,6 +90,7 @@ class MarketData:
     timestamp: datetime = field(default_factory=datetime.now)
     orderbook: Optional[Dict] = None  # Full orderbook if available
     recent_trades: Optional[List[Dict]] = None  # Recent trades for VPIN
+    end_date_ts: Optional[float] = None  # Unix sec when market resolves (for expiry checks)
     
     @property
     def spread_cents(self) -> float:

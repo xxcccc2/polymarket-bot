@@ -182,6 +182,7 @@ def test_end_to_end_buy_fill_then_mirrored_sell_signal(monkeypatch):
             "tracked_wallets": ["0xleader"],
             "risk_manager": rm,
             "min_tracked_trade_usd": 1,
+            "min_wallet_poll_seconds": 0,
         }
     )
     market = _make_market("token-1")
@@ -278,6 +279,7 @@ def test_multi_leader_same_token_sell_is_selective(monkeypatch):
             "risk_manager": rm,
             "min_tracked_trade_usd": 1,
             "cooldown_seconds": 0,
+            "min_wallet_poll_seconds": 0,
         }
     )
     market = _make_market("token-1")

@@ -421,27 +421,30 @@ class ArbitrageStrategy(BaseStrategy):
                 continue
             
             try:
-                # Place YES order
-                yes_result = order_manager.place_limit_order(
-                    token_id=yes_signal.token_id,
-                    side="BUY",
-                    price=yes_signal.price,
-                    size=yes_signal.size,
-                    order_type="GTC",
-                    market_slug=yes_signal.market_slug,
-                    metadata={"strategy": "arbitrage", "leg": "YES", "arb_id": arb_id}
+                batch = order_manager.place_limit_orders_batch(
+                    [
+                        {
+                            "token_id": yes_signal.token_id,
+                            "side": "BUY",
+                            "price": yes_signal.price,
+                            "size": yes_signal.size,
+                            "order_type": "GTC",
+                            "market_slug": yes_signal.market_slug,
+                            "metadata": {"strategy": "arbitrage", "leg": "YES", "arb_id": arb_id},
+                        },
+                        {
+                            "token_id": no_signal.token_id,
+                            "side": "BUY",
+                            "price": no_signal.price,
+                            "size": no_signal.size,
+                            "order_type": "GTC",
+                            "market_slug": no_signal.market_slug,
+                            "metadata": {"strategy": "arbitrage", "leg": "NO", "arb_id": arb_id},
+                        },
+                    ]
                 )
-                
-                # Place NO order
-                no_result = order_manager.place_limit_order(
-                    token_id=no_signal.token_id,
-                    side="BUY",
-                    price=no_signal.price,
-                    size=no_signal.size,
-                    order_type="GTC",
-                    market_slug=no_signal.market_slug,
-                    metadata={"strategy": "arbitrage", "leg": "NO", "arb_id": arb_id}
-                )
+                yes_result = batch[0] if len(batch) > 0 else {"success": False, "error": "Missing YES batch result"}
+                no_result = batch[1] if len(batch) > 1 else {"success": False, "error": "Missing NO batch result"}
                 
                 if yes_result.get("success") and no_result.get("success"):
                     # Track the arb

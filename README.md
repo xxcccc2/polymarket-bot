@@ -1,17 +1,19 @@
 # Polymarket Trading Bot
 
-An institutional-grade algorithmic trading platform for Polymarket prediction markets, with real-time Binance cross-asset signals, adaptive risk management, and Telegram alerts.
+An institutional-grade algorithmic trading platform for Polymarket prediction markets, with real-time Binance cross-asset signals, wallet-copy automation, adaptive risk management, and Telegram alerts.
 
 ## Features
 
-- **9 Trading Strategies** — from cross-asset latency arb to stink bids
+- **12 Trading Strategies** — from wallet-copy to cross-asset latency arb
 - **Binance BTC Feed** — real-time VWAP, volatility, and price velocity for 5-min BTC markets
 - **Adaptive Risk Manager** — bankroll-proportional limits, drawdown throttling, auto-halt
+- **Multi-Wallet Profiles** — run CHR/BB/etc. concurrently from one shared config file
 - **Strategy Analytics** — per-strategy P&L, Sharpe ratio, win rate, streaks, auto-disable losers
 - **Telegram Alerts** — fills, risk events, daily summaries pushed to your phone
 - **Kelly Criterion Sizing** — mathematically optimal position sizing with safety caps
 - **Paper Trading** — full simulation mode, zero risk
 - **Order Lifecycle** — tracking, duplicate prevention, stale cleanup, graceful shutdown cancellation
+- **Wallet Analysis** — reverse-engineer tracked wallets to infer strategies (markets, sizing, horizons)
 
 ## Quick Start
 
@@ -41,28 +43,46 @@ Edit `.env` with your credentials:
 | `TELEGRAM_BOT_TOKEN` | No | For push notifications (see Telegram Setup) |
 | `TELEGRAM_CHAT_ID` | No | Your Telegram chat ID |
 
+Optional (recommended for multi-wallet):
+
+- Use one shared non-secret config file via `BOT_PUBLIC_CONFIG_FILE`.
+- Keep per-wallet secrets in `.env`:
+  - `POLYMARKET_PRIVATE_KEY_<ID>`
+  - `POLYMARKET_PROXY_ADDRESS_<ID>`
+  - `SIGNATURE_TYPE_<ID>`
+
 ### 3. Run the Bot
 
 ```bash
 # Paper test with recommended BTC 5-min strategies (default)
-python -m src.bot
+./venv/bin/python -m src.bot
 
 # Run specific strategy
-python -m src.bot --strategy cross_asset
+./venv/bin/python -m src.bot --strategy cross_asset
 
 # Run all non-disabled strategies
-python -m src.bot --strategy all
+./venv/bin/python -m src.bot --strategy all
 
 # List available strategies
-python -m src.bot --list-strategies
+./venv/bin/python -m src.bot --list-strategies
 
 # Force paper mode
-python -m src.bot --paper
+./venv/bin/python -m src.bot --paper
+
+# Multi-wallet live runs (two processes)
+BOT_PUBLIC_CONFIG_FILE=./config/settings.walletcopy.multiwallet.example BOT_WALLET_ID=CHR ./venv/bin/python -m src.bot --strategy wallet_copy
+BOT_PUBLIC_CONFIG_FILE=./config/settings.walletcopy.multiwallet.example BOT_WALLET_ID=BB  ./venv/bin/python -m src.bot --strategy wallet_copy
 ```
 
 ## Configuration
 
-All configuration lives in `.env`. Key settings:
+Configuration can be layered:
+
+1. shared non-secret file via `BOT_PUBLIC_CONFIG_FILE` (optional)
+2. private `.env` (secrets)
+3. shell env vars (highest priority)
+
+Key settings:
 
 ### Trading Parameters
 
@@ -72,11 +92,11 @@ All configuration lives in `.env`. Key settings:
 | `ORDER_SIZE_USD` | `10` | Base order size (adaptive risk may override) |
 | `MAX_POSITION_USD` | `100` | Max position per market |
 | `DAILY_LOSS_LIMIT_USD` | `50` | Circuit breaker |
-| `SCAN_INTERVAL_SECONDS` | `30` | Time between strategy scans |
+| `SCAN_INTERVAL_SECONDS` | `5` | Time between strategy scans |
 
 ### Adaptive Risk (Phase 3)
 
-When `ADAPTIVE_RISK_ENABLED=true`, all limits scale with your current balance:
+When `ADAPTIVE_RISK_ENABLED=true`, limits scale with current balance and drawdown state:
 
 | Metric | % of Bankroll | With $79 |
 |--------|---------------|----------|
@@ -84,9 +104,19 @@ When `ADAPTIVE_RISK_ENABLED=true`, all limits scale with your current balance:
 | Max per market | 12% | ~$9.52 |
 | Max total exposure | 30% | ~$23.79 |
 | Daily loss limit | 6% | ~$4.76 |
-| Drawdown throttle | at -5% | Cuts sizes to 50% |
-| Drawdown halt | at -12% | Full stop |
+| Drawdown throttle | configurable | Reduces size progressively |
+| Drawdown halt | configurable | Full stop |
 | Balance floor | 70% | ~$55.51 |
+
+Related controls:
+- `ADAPTIVE_MAX_POSITION_PCT`
+- `ADAPTIVE_MAX_EXPOSURE_PCT`
+- `ADAPTIVE_MAX_SINGLE_TRADE_PCT`
+- `ADAPTIVE_DAILY_LOSS_LIMIT_PCT`
+- `ADAPTIVE_DRAWDOWN_THROTTLE_PCT`
+- `ADAPTIVE_DRAWDOWN_HALT_PCT`
+- `ADAPTIVE_MIN_BALANCE_FLOOR_PCT`
+- `BALANCE_STALE_BLOCK_BUYS` / `BALANCE_STALE_MAX_SECONDS` (safety gate when balance refresh is stale)
 
 ### Strategy Selection
 
@@ -128,8 +158,19 @@ Passive asymmetric bets — $1 bids for potential 100x:
 Copy trades from top Polymarket traders:
 - Tracks wallets from leaderboard (by PnL) or manual list
 - Polls their trades via Data API, copies new BUYs with configurable size
-- Filters: crypto-only, min trade size, max copy delay
-- Run: `python -m src.bot --strategy wallet_copy`
+- Filters: crypto-only, min trade size, max copy delay, per-wallet poll throttle
+- `TRACKED_WALLETS` format: comma-separated addresses (`0xabc...,0xdef...`)
+- Run: `./venv/bin/python -m src.bot --strategy wallet_copy`
+
+**Analyze wallets before copying** — use the analysis script to infer a wallet's strategy (BTC vs multi-crypto, 5m vs 15m, avg size, etc.):
+
+```bash
+python scripts/analyze_wallets.py
+# Custom wallets:
+TRACKED_WALLETS=0xabc...,0xdef... python scripts/analyze_wallets.py
+# If you hit proxy errors:
+unset http_proxy https_proxy; python scripts/analyze_wallets.py
+```
 
 #### 6. Late Money ✅ `late_money`
 Follow informed traders near expiration:
@@ -176,20 +217,32 @@ Polymarket vs Kalshi arb. Disabled: requires Kalshi infrastructure.
 
 ```bash
 # Recommended: BTC 5-min + advanced strategies (default)
-python -m src.bot --strategy btc_5min
+./venv/bin/python -m src.bot --strategy btc_5min
 
 # Just cross-asset latency arb
-python -m src.bot --strategy cross_asset
+./venv/bin/python -m src.bot --strategy cross_asset
 
 # Just VPIN smart money detection
-python -m src.bot --strategy vpin
+./venv/bin/python -m src.bot --strategy vpin
 
 # Just sentiment-driven trading
-python -m src.bot --strategy sentiment
+./venv/bin/python -m src.bot --strategy sentiment
 
 # All non-disabled strategies (12 total, 8 active)
-python -m src.bot --strategy all
+./venv/bin/python -m src.bot --strategy all
 ```
+
+## Wallet-Copy Troubleshooting
+
+- **`not enough balance / allowance` while TUI balance looks high**:
+  - This usually means low **spendable collateral**, not low total portfolio value.
+  - Enable `ALLOWANCE_DIAGNOSTICS_ENABLED=true` to log allowance snapshots.
+- **Repeated 401 on fill checks**:
+  - Credential refresh is automatic, but network/latency can still slow loops.
+  - Tune `TRADE_FETCH_TIMEOUT_SECONDS` and `BALANCE_FETCH_TIMEOUT_SECONDS`.
+- **Adaptive risk with stale balance**:
+  - With `BALANCE_STALE_BLOCK_BUYS=true`, new BUYs are blocked if balance is stale too long.
+  - This prevents oversizing on outdated balance data.
 
 ## Telegram Alerts
 
@@ -255,6 +308,8 @@ When enabled, all risk limits scale dynamically with your balance:
 
 ```
 polymarket-bot/
+├── scripts/
+│   └── analyze_wallets.py       # Reverse-engineer wallets to infer strategies
 ├── src/
 │   ├── bot.py                    # Main orchestrator
 │   ├── client.py                 # Polymarket CLOB client
@@ -283,7 +338,11 @@ polymarket-bot/
 │       ├── cross_asset_strategy.py       # Binance → Polymarket latency arb
 │       ├── terminal_convergence_strategy.py  # Near-expiry convergence
 │       ├── orderbook_imbalance_strategy.py   # Bid/ask pressure
-│       └── cross_platform_arbitrage_strategy.py  # Polymarket vs Kalshi
+│       ├── cross_platform_arbitrage_strategy.py  # Polymarket vs Kalshi
+│       ├── vpin_strategy.py                      # Informed flow detection
+│       ├── sentiment_strategy.py                 # News sentiment divergence
+│       ├── combinatorial_arb_strategy.py         # Logical pricing constraints
+│       └── wallet_copy_strategy.py               # Copy top traders
 ├── data/                   # Runtime data (gitignored)
 ├── logs/                   # Log files (gitignored)
 ├── docs/

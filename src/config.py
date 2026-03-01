@@ -139,6 +139,9 @@ CRYPTO_MARKET_KEYWORDS = [
 # Enable 5-min BTC market strategies
 ENABLE_BTC_5MIN = os.getenv("ENABLE_BTC_5MIN", "true").lower() == "true"
 
+# Block orders on markets that resolve in more than this many hours (0 = disabled)
+MAX_HOURS_TO_EXPIRY = float(os.getenv("MAX_HOURS_TO_EXPIRY", "1"))
+
 # Keywords to identify short-term BTC markets on Polymarket
 # Actual market titles: "Bitcoin Up or Down - 5 min", "- 15 min", "- 1 hour"
 BTC_5MIN_KEYWORDS = [
@@ -216,6 +219,13 @@ DISABLED_STRATEGIES = [
 
 # Enable adaptive (bankroll-proportional) risk management
 ADAPTIVE_RISK_ENABLED = os.getenv("ADAPTIVE_RISK_ENABLED", "true").lower() == "true"
+ADAPTIVE_MAX_POSITION_PCT = float(os.getenv("ADAPTIVE_MAX_POSITION_PCT", "0.12"))
+ADAPTIVE_MAX_EXPOSURE_PCT = float(os.getenv("ADAPTIVE_MAX_EXPOSURE_PCT", "0.30"))
+ADAPTIVE_MAX_SINGLE_TRADE_PCT = float(os.getenv("ADAPTIVE_MAX_SINGLE_TRADE_PCT", "0.04"))
+ADAPTIVE_DAILY_LOSS_LIMIT_PCT = float(os.getenv("ADAPTIVE_DAILY_LOSS_LIMIT_PCT", "0.06"))
+ADAPTIVE_DRAWDOWN_THROTTLE_PCT = float(os.getenv("ADAPTIVE_DRAWDOWN_THROTTLE_PCT", "0.05"))
+ADAPTIVE_DRAWDOWN_HALT_PCT = float(os.getenv("ADAPTIVE_DRAWDOWN_HALT_PCT", "0.12"))
+ADAPTIVE_MIN_BALANCE_FLOOR_PCT = float(os.getenv("ADAPTIVE_MIN_BALANCE_FLOOR_PCT", "0.70"))
 
 # =============================================================================
 # VPIN (Volume-Synchronized Probability of Informed Trading)
@@ -260,6 +270,7 @@ WALLET_COPY_MAX_DELAY_SECONDS = int(os.getenv("WALLET_COPY_MAX_DELAY_SECONDS", "
 WALLET_COPY_MIN_TRADE_USD = float(os.getenv("WALLET_COPY_MIN_TRADE_USD", "10"))
 WALLET_COPY_CRYPTO_ONLY = os.getenv("WALLET_COPY_CRYPTO_ONLY", "true").lower() == "true"
 WALLET_COPY_COOLDOWN_SECONDS = int(os.getenv("WALLET_COPY_COOLDOWN_SECONDS", "60"))
+WALLET_COPY_MIN_WALLET_POLL_SECONDS = float(os.getenv("WALLET_COPY_MIN_WALLET_POLL_SECONDS", "2.0"))
 
 # =============================================================================
 # BOT BEHAVIOR
@@ -295,6 +306,16 @@ RETRY_MAX_DELAY_SECONDS = float(os.getenv("RETRY_MAX_DELAY_SECONDS", "5"))
 # Auto-refresh CLOB allowance to prevent live trading stalls
 AUTO_ALLOWANCE_REFRESH_ENABLED = os.getenv("AUTO_ALLOWANCE_REFRESH_ENABLED", "true").lower() == "true"
 ALLOWANCE_REFRESH_SECONDS = int(os.getenv("ALLOWANCE_REFRESH_SECONDS", "900"))
+ALLOWANCE_DIAGNOSTICS_ENABLED = os.getenv("ALLOWANCE_DIAGNOSTICS_ENABLED", "false").lower() == "true"
+# CLOB session heartbeat
+CLOB_HEARTBEAT_ENABLED = os.getenv("CLOB_HEARTBEAT_ENABLED", "true").lower() == "true"
+CLOB_HEARTBEAT_INTERVAL_SECONDS = float(os.getenv("CLOB_HEARTBEAT_INTERVAL_SECONDS", "8"))
+# Bound read calls so slow endpoints don't stall scan loop
+TRADE_FETCH_TIMEOUT_SECONDS = float(os.getenv("TRADE_FETCH_TIMEOUT_SECONDS", "7"))
+BALANCE_FETCH_TIMEOUT_SECONDS = float(os.getenv("BALANCE_FETCH_TIMEOUT_SECONDS", "7"))
+# Safety: block BUY entries if balance refresh is stale
+BALANCE_STALE_BLOCK_BUYS = os.getenv("BALANCE_STALE_BLOCK_BUYS", "true").lower() == "true"
+BALANCE_STALE_MAX_SECONDS = int(os.getenv("BALANCE_STALE_MAX_SECONDS", "240"))
 
 # Disable analytics/P&L tracking to reduce runtime overhead
 ENABLE_STRATEGY_ANALYTICS = os.getenv("ENABLE_STRATEGY_ANALYTICS", "true").lower() == "true"

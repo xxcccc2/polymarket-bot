@@ -77,7 +77,7 @@ class TerminalConvergenceStrategy(BaseStrategy):
         self.signal_cooldown_s = self.config.get("signal_cooldown_s", 15)
 
     def should_trade_market(self, market_data: MarketData) -> bool:
-        """Only trade 5-min BTC markets that are near expiry."""
+        """Only trade 5-min BTC markets that are within the convergence window (near expiry)."""
         if not ENABLE_BTC_5MIN:
             return False
 
@@ -88,6 +88,16 @@ class TerminalConvergenceStrategy(BaseStrategy):
         is_5min = any(kw in text for kw in BTC_5MIN_KEYWORDS)
         if not (is_btc and is_5min):
             return False
+
+        # Must be within convergence window (seconds before expiry)
+        end_ts = getattr(market_data, "end_date_ts", None)
+        if end_ts is None:
+            return False
+        sec_to_expiry = end_ts - time.time()
+        if sec_to_expiry < 0:
+            return False  # already expired
+        if sec_to_expiry > self.convergence_window_s:
+            return False  # too far from expiry (e.g. 2 days ahead)
 
         # Check cooldown
         last_t = self.last_signal_time.get(market_data.token_id, 0)

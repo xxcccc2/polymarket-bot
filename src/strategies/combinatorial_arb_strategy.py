@@ -391,22 +391,26 @@ class CombinatorialArbStrategy(BaseStrategy):
 
         # Signal 1: Buy the underpriced market (should be more expensive)
         if COMBO_MIN_BUY_PRICE < under_price < COMBO_MAX_BUY_PRICE:
-            signals.append(Signal(
-                strategy=self.name,
-                signal_type=SignalType.BUY,
-                token_id=under_md.token_id or "",
-                market_slug=under_md.market_slug or "",
-                price=under_price,
-                size=self.order_size,
-                confidence=confidence,
-                metadata={
-                    "violation_type": "monotonicity_buy_underpriced",
-                    "edge_cents": edge_cents,
-                    "threshold": under_thresh,
-                    "pair_market": over_md.market_slug or "",
-                    "asset": group.asset,
-                },
-            ))
+            size_shares = self.order_size / under_price if under_price > 0 else 0
+            if size_shares >= 0.1:
+                signals.append(Signal(
+                    signal_type=SignalType.BUY,
+                    token_id=under_md.token_id or "",
+                    market_slug=under_md.market_slug or "",
+                    side="YES",
+                    price=under_price,
+                    size=round(size_shares, 2),
+                    confidence=confidence,
+                    reason=f"Combo arb: {group.asset} {group.direction} ${under_thresh:,.0f} underpriced vs ${over_thresh:,.0f}",
+                    metadata={
+                        "strategy": self.name,
+                        "violation_type": "monotonicity_buy_underpriced",
+                        "edge_cents": edge_cents,
+                        "threshold": under_thresh,
+                        "pair_market": over_md.market_slug or "",
+                        "asset": group.asset,
+                    },
+                ))
 
         self._pair_cooldowns[pair_key] = now
         return signals

@@ -13,6 +13,7 @@ Flow:
 
 from typing import List, Dict, Any, Optional
 from collections import defaultdict
+import time
 
 from .base_strategy import BaseStrategy, Signal, SignalType, MarketData
 from ..logging_utils import cprint
@@ -31,6 +32,7 @@ from ..config import (
     WALLET_COPY_MIN_TRADE_USD,
     WALLET_COPY_CRYPTO_ONLY,
     WALLET_COPY_COOLDOWN_SECONDS,
+    WALLET_COPY_MIN_WALLET_POLL_SECONDS,
 )
 
 
@@ -76,10 +78,14 @@ class WalletCopyStrategy(BaseStrategy):
         self.max_copy_delay_seconds = self.config.get("max_copy_delay_seconds", WALLET_COPY_MAX_DELAY_SECONDS)
         self.min_tracked_trade_usd = self.config.get("min_tracked_trade_usd", WALLET_COPY_MIN_TRADE_USD)
         self.crypto_only = self.config.get("crypto_only", WALLET_COPY_CRYPTO_ONLY)
+        self.min_wallet_poll_seconds = float(
+            self.config.get("min_wallet_poll_seconds", WALLET_COPY_MIN_WALLET_POLL_SECONDS)
+        )
         
         # Last seen trade IDs per wallet (to detect NEW trades)
         self._last_seen_ids: Dict[str, Dict[str, None]] = defaultdict(dict)
         self._max_ids_per_wallet = 200
+        self._last_wallet_poll_ts: Dict[str, float] = {}
         
         # Cooldown per token (avoid copy-spam)
         self._token_cooldown: Dict[str, float] = {}
@@ -102,7 +108,6 @@ class WalletCopyStrategy(BaseStrategy):
         if not self.use_leaderboard:
             return
         
-        import time
         now = time.time()
         if now - self.last_leaderboard_refresh < self.leaderboard_refresh_interval:
             return
@@ -171,20 +176,31 @@ class WalletCopyStrategy(BaseStrategy):
         # Polymarket timestamps may be in ms
         if ts_num > 1e12:
             ts_num = ts_num / 1000.0
-        import time
         age = time.time() - ts_num
         return age > self.max_copy_delay_seconds
 
     def _prune_stale_copied_from(self) -> None:
-        """Drop copied-from mappings when we no longer hold a position."""
+        """Drop copied-from mappings when we no longer hold a position and have no pending BUY."""
         rm = self.risk_manager
         if not rm:
             return
         positions = getattr(rm, "positions", {}) or {}
+        om = self.config.get("order_manager")
         for token_id in list(self.copied_from.keys()):
             pos = positions.get(token_id)
-            if not pos or getattr(pos, "size", 0) <= 0:
-                self.copied_from.pop(token_id, None)
+            has_position = pos and getattr(pos, "size", 0) > 0
+            # Keep mapping if we have position OR have pending wallet_copy BUY for this token
+            has_pending_buy = False
+            if om:
+                for o in om.get_orders_for_token(token_id):
+                    if not o.is_active:
+                        continue
+                    if (getattr(o, "metadata", {}) or {}).get("strategy") == "wallet_copy" and (o.side or "").upper() == "BUY":
+                        has_pending_buy = True
+                        break
+            if has_position or has_pending_buy:
+                continue
+            self.copied_from.pop(token_id, None)
 
     def _ensure_fill_hook(self, order_manager) -> None:
         """Register fill hook once so provenance is tracked on real fills."""
@@ -224,12 +240,10 @@ class WalletCopyStrategy(BaseStrategy):
             self.sells_mirrored += 1
     
     def _check_token_cooldown(self, token_id: str) -> bool:
-        import time
         last = self._token_cooldown.get(token_id, 0)
         return (time.time() - last) < self.cooldown_seconds
     
     def _set_token_cooldown(self, token_id: str) -> None:
-        import time
         self._token_cooldown[token_id] = time.time()
     
     def should_trade_market(self, market_data: MarketData) -> bool:
@@ -255,8 +269,13 @@ class WalletCopyStrategy(BaseStrategy):
         for wallet in self.tracked_wallets:
             if our_wallet and wallet and wallet.lower() == our_wallet:
                 continue  # Never copy ourselves
+            last_poll = self._last_wallet_poll_ts.get(wallet, 0.0)
+            if (time.time() - last_poll) < self.min_wallet_poll_seconds:
+                continue
+            self._last_wallet_poll_ts[wallet] = time.time()
             try:
-                trades = get_trades_by_user(wallet, limit=20, taker_only=True)
+                # taker_only=False so we see their maker sells too (resting limit sells that get hit)
+                trades = get_trades_by_user(wallet, limit=20, taker_only=False)
             except Exception as e:
                 cprint(f"   [WALLET_COPY] Failed to fetch {wallet[:10]}...: {e}", "yellow")
                 continue
@@ -372,6 +391,8 @@ class WalletCopyStrategy(BaseStrategy):
                 
                 trader = trade.get("userName") or trade.get("pseudonym") or wallet[:12]
                 reason = f"Copy {trader}: BUY {size:.1f} @ {price*100:.1f}¢"
+                # Record provenance now so SELL mirroring works even if our fill detection lags
+                self.copied_from.setdefault(token_id, set()).add(wallet)
                 
                 signal = Signal(
                     signal_type=SignalType.BUY,

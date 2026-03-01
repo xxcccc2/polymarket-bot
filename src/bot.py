@@ -13,6 +13,7 @@ import sys
 import time
 import signal
 import threading
+from dataclasses import replace
 from typing import Dict, List, Optional, Type
 from datetime import datetime
 
@@ -26,6 +27,7 @@ from .config import (
     SCAN_INTERVAL_SECONDS,
     BALANCE_REFRESH_SECONDS,
     MARKET_REFRESH_SECONDS,
+    MAX_HOURS_TO_EXPIRY,
     ENABLE_WEBSOCKET_FEED,
     ENABLE_BTC_5MIN,
     PAPER_TRADING,
@@ -34,10 +36,20 @@ from .config import (
     BTC_5MIN_KEYWORDS,
     DISABLED_STRATEGIES,
     ADAPTIVE_RISK_ENABLED,
+    ADAPTIVE_MAX_POSITION_PCT,
+    ADAPTIVE_MAX_EXPOSURE_PCT,
+    ADAPTIVE_MAX_SINGLE_TRADE_PCT,
+    ADAPTIVE_DAILY_LOSS_LIMIT_PCT,
+    ADAPTIVE_DRAWDOWN_THROTTLE_PCT,
+    ADAPTIVE_DRAWDOWN_HALT_PCT,
+    ADAPTIVE_MIN_BALANCE_FLOOR_PCT,
     TELEGRAM_BOT_TOKEN,
     TELEGRAM_CHAT_ID,
     TELEGRAM_ALERTS_ENABLED,
     MIN_VOLUME_USD,
+    TRADING_FEE_RATE,
+    BALANCE_STALE_BLOCK_BUYS,
+    BALANCE_STALE_MAX_SECONDS,
     print_config,
     validate_config,
     ENABLE_STRATEGY_ANALYTICS,
@@ -102,7 +114,16 @@ class PolymarketBot:
         self.order_manager: Optional[OrderManager] = None
         self.risk_manager = RiskManager(
             store=self.store,
-            adaptive_config={"enabled": ADAPTIVE_RISK_ENABLED},
+            adaptive_config={
+                "enabled": ADAPTIVE_RISK_ENABLED,
+                "max_position_pct": ADAPTIVE_MAX_POSITION_PCT,
+                "max_exposure_pct": ADAPTIVE_MAX_EXPOSURE_PCT,
+                "max_single_trade_pct": ADAPTIVE_MAX_SINGLE_TRADE_PCT,
+                "daily_loss_limit_pct": ADAPTIVE_DAILY_LOSS_LIMIT_PCT,
+                "drawdown_throttle_pct": ADAPTIVE_DRAWDOWN_THROTTLE_PCT,
+                "drawdown_halt_pct": ADAPTIVE_DRAWDOWN_HALT_PCT,
+                "min_balance_floor_pct": ADAPTIVE_MIN_BALANCE_FLOOR_PCT,
+            },
         )
         self.analytics_enabled = ENABLE_STRATEGY_ANALYTICS
         self.strategy_tracker = StrategyTracker() if self.analytics_enabled else None
@@ -193,6 +214,7 @@ class PolymarketBot:
         self.markets: Dict[str, Dict] = {}  # condition_id -> market data
         self.market_data_cache: Dict[str, MarketData] = {}
         self._scan_count = 0
+        self._last_balance_refresh_success_ts = 0.0
         
         # TUI dashboard
         self.dashboard = Dashboard()
@@ -239,7 +261,9 @@ class PolymarketBot:
         # Initialize order manager with connected client
         self.order_manager = OrderManager(self.client, store=self.store)
         self.order_manager.start_cleanup_loop()
-        
+        for strat in self.strategies:
+            strat.config["order_manager"] = self.order_manager
+
         # Register order callbacks
         self.order_manager.on_fill(self._on_order_fill)
         self.order_manager.on_cancel(self._on_order_cancel)
@@ -349,6 +373,12 @@ class PolymarketBot:
             self.feed.stop()
         except Exception:
             pass
+
+        # Stop client background tasks (e.g. CLOB heartbeat loop)
+        try:
+            self.client.stop_background_tasks()
+        except Exception:
+            pass
         
         # Print final stats
         self._print_final_stats()
@@ -367,7 +397,9 @@ class PolymarketBot:
         last_fill_check = 0
         last_balance_check = 0
         last_market_refresh = 0
+        last_sync = 0
         fill_check_interval = 10  # Check for fills every 10 seconds
+        sync_interval = 120  # Sync order state with exchange every 2 min (catches missed fills)
         self._recent_trades_cache: List[Dict] = []  # shared with VPIN
         self._first_scan_done = False
         
@@ -410,6 +442,19 @@ class PolymarketBot:
                     if dt > 5:
                         cprint(f"   ⏱️  market_refresh took {dt:.1f}s (slow!)", "yellow")
                     last_market_refresh = time.time()
+
+                # Sync order state + positions from exchange/API (catches missed fills)
+                if time.time() - last_sync >= sync_interval and not PAPER_TRADING:
+                    try:
+                        if self.order_manager.orders:
+                            self.order_manager.sync_with_exchange()
+                        # Sync exposure from Data API positions (ground truth, not fill-derived)
+                        positions = self.client.get_positions(limit=150)
+                        if positions:
+                            self.risk_manager.sync_positions_from_api(positions)
+                        last_sync = time.time()
+                    except Exception as e:
+                        cprint(f"   ⚠️  sync error: {e}", "yellow")
                 
                 # Small sleep to prevent CPU spinning
                 time.sleep(0.1)
@@ -498,6 +543,21 @@ class PolymarketBot:
                     is_sell = sig.signal_type == SignalType.SELL
                     trade_value = sig.size * sig.price
                     adaptive_size = self.risk_manager.get_adaptive_order_size(trade_value)
+                    exec_signal = sig
+                    resized = False
+
+                    if (
+                        BALANCE_STALE_BLOCK_BUYS
+                        and not is_sell
+                        and self._last_balance_refresh_success_ts > 0
+                    ):
+                        age = time.time() - self._last_balance_refresh_success_ts
+                        if age > BALANCE_STALE_MAX_SECONDS:
+                            n_blocked += 1
+                            block_reason = (
+                                f"Balance data stale ({int(age)}s > {BALANCE_STALE_MAX_SECONDS}s)"
+                            )
+                            continue
                     
                     # For BUY: check risk limits. For SELL (position close): skip
                     if not is_sell:
@@ -511,24 +571,66 @@ class PolymarketBot:
                             n_blocked += 1
                             block_reason = reason
                             continue
+
+                        # Adaptive risk should resize actual execution, not just checks.
+                        if sig.price > 0:
+                            adaptive_shares = adaptive_size / sig.price
+                            if adaptive_shares < 0.1:
+                                n_blocked += 1
+                                block_reason = "Adaptive size below 0.1 share minimum"
+                                continue
+                            exec_signal = replace(sig, size=round(adaptive_shares, 4))
+                            resized = abs(exec_signal.size - sig.size) > 0.0001
+
+                            # Visibility: show when adaptive risk materially resizes BUYs.
+                            if resized and not _DASHBOARD_MODE:
+                                original_notional = sig.size * sig.price
+                                resized_notional = exec_signal.size * exec_signal.price
+                                rel_delta = (
+                                    abs(resized_notional - original_notional) / original_notional
+                                    if original_notional > 0
+                                    else 0.0
+                                )
+                                if rel_delta >= 0.05:
+                                    import time as _t
+                                    _arl = getattr(self, "_adaptive_resize_log", {})
+                                    _now = _t.time()
+                                    key = f"{strategy.name}:{sig.token_id}"
+                                    if _now - _arl.get(key, 0) >= 15:
+                                        _arl[key] = _now
+                                        self._adaptive_resize_log = _arl
+                                        throttle = self.risk_manager.get_throttle_factor()
+                                        cprint(
+                                            f"🔧 [{strat_name}] adaptive resize: "
+                                            f"${original_notional:.2f} -> ${resized_notional:.2f} "
+                                            f"({sig.size:.2f} -> {exec_signal.size:.2f} shares, throttle {throttle*100:.0f}%)",
+                                            "cyan",
+                                        )
                     
                     # Execute via strategy
-                    results = strategy.execute([sig], self.order_manager)
+                    results = strategy.execute([exec_signal], self.order_manager)
                     
                     # Record trade in both risk manager and analytics tracker
                     for result in results:
                         if result.get("success"):
                             n_executed += 1
-                            fee_est = adaptive_size * 0.01  # ~1% fee
-                            self.risk_manager.record_trade(adaptive_size, fee_est)
+                            executed_notional = exec_signal.size * exec_signal.price
+                            order = result.get("order")
+                            if order:
+                                try:
+                                    executed_notional = float(order.size) * float(order.price)
+                                except Exception:
+                                    pass
+                            fee_est = executed_notional * TRADING_FEE_RATE
+                            self.risk_manager.record_trade(executed_notional, fee_est)
                             if self.analytics_enabled and self.strategy_tracker:
                                 self.strategy_tracker.record_trade(
                                     strategy=strategy.name,
-                                    token_id=sig.token_id,
-                                    market_slug=sig.market_slug,
-                                    side=sig.side,
-                                    price=sig.price,
-                                    size=sig.size,
+                                    token_id=exec_signal.token_id,
+                                    market_slug=exec_signal.market_slug,
+                                    side=exec_signal.side,
+                                    price=exec_signal.price,
+                                    size=exec_signal.size,
                                     pnl=0.0,  # P&L tracked on exit
                                     fees=fee_est,
                                     is_exit=is_sell,
@@ -649,10 +751,35 @@ class PolymarketBot:
         )
         self.dashboard.update(state)
     
+    def _parse_market_end_ts(self, m: dict) -> Optional[float]:
+        """Parse market end/resolution timestamp. Returns Unix sec or None."""
+        for key in ("endDate", "end_date", "end_date_iso", "closeTime", "resolutionDate"):
+            val = m.get(key)
+            if not val:
+                continue
+            if isinstance(val, (int, float)):
+                v = float(val)
+                if v > 1e12:
+                    return v / 1000
+                if v > 1e9:
+                    return v
+                return None
+            if isinstance(val, str):
+                try:
+                    parsed = datetime.fromisoformat(val.replace("Z", "+00:00"))
+                    return parsed.timestamp()
+                except Exception:
+                    pass
+        slug = m.get("slug", "")
+        parts = slug.rsplit("-", 1)
+        if len(parts) == 2 and parts[1].isdigit():
+            return float(parts[1])
+        return None
+
     def _build_market_data(self) -> List[MarketData]:
         """Build MarketData objects from cached data."""
         data_list = []
-        
+
         for condition_id, market in self.markets.items():
             try:
                 # Gamma API includes bestBid/bestAsk directly in market data!
@@ -736,6 +863,8 @@ class PolymarketBot:
                         if (t.get("asset_id") or t.get("token_id")) == token_id
                     ]
 
+                    end_ts = self._parse_market_end_ts(market) if is_btc_st else None
+
                     data = MarketData(
                         token_id=token_id,
                         condition_id=condition_id,
@@ -750,6 +879,7 @@ class PolymarketBot:
                         liquidity=float(market.get("liquidityClob", 0) or 0),
                         last_price=float(market.get("lastTradePrice", t_mid) or t_mid),
                         recent_trades=token_trades if token_trades else None,
+                        end_date_ts=end_ts,
                     )
                     
                     data_list.append(data)
@@ -842,6 +972,37 @@ class PolymarketBot:
             # Filter markets based on settings
             filtered = []
             seen_ids = set()
+            now_ts = time.time()
+            max_expiry_sec = MAX_HOURS_TO_EXPIRY * 3600 if MAX_HOURS_TO_EXPIRY > 0 else 0
+
+            def _market_end_ts(m: dict) -> Optional[float]:
+                """Parse market end/resolution timestamp. Returns Unix sec or None."""
+                for key in ("endDate", "end_date", "end_date_iso", "closeTime", "resolutionDate"):
+                    val = m.get(key)
+                    if not val:
+                        continue
+                    if isinstance(val, (int, float)):
+                        v = float(val)
+                        if v > 1e12:
+                            return v / 1000  # milliseconds
+                        if v > 1e9:
+                            return v  # seconds
+                        return None
+                    if isinstance(val, str):
+                        try:
+                            from datetime import datetime as dt
+                            # ISO or similar
+                            parsed = dt.fromisoformat(val.replace("Z", "+00:00"))
+                            return parsed.timestamp()
+                        except Exception:
+                            pass
+                # Fallback: slug like btc-updown-15m-1772402400 has Unix timestamp
+                slug = m.get("slug", "")
+                parts = slug.rsplit("-", 1)
+                if len(parts) == 2 and parts[1].isdigit():
+                    return float(parts[1])
+                return None
+
             for market in markets:
                 question = market.get("question", "").lower()
                 slug = market.get("slug", "").lower()
@@ -852,6 +1013,15 @@ class PolymarketBot:
                 if cid in seen_ids:
                     continue
                 seen_ids.add(cid)
+                
+                # Skip markets resolving in more than MAX_HOURS_TO_EXPIRY
+                # Exempt threshold markets (combo_arb). Filter far-dated non-threshold (e.g. up/down buckets).
+                if max_expiry_sec > 0:
+                    is_threshold = any(kw in text for kw in ["above", "below", "over", "under", "exceed", "reach"])
+                    if not is_threshold:
+                        end_ts = _market_end_ts(market)
+                        if end_ts is not None and (end_ts - now_ts) > max_expiry_sec:
+                            continue
                 
                 # Check if crypto-related (if filter enabled)
                 if ONLY_CRYPTO_MARKETS:
@@ -944,6 +1114,7 @@ class PolymarketBot:
                 return
 
             self.risk_manager.set_balance(balance)
+            self._last_balance_refresh_success_ts = time.time()
             if force_log:
                 label = "PAPER" if PAPER_TRADING else "LIVE"
                 cprint(f"💰 {label} balance: ${balance:.2f}", "white")
@@ -967,7 +1138,7 @@ class PolymarketBot:
     def _check_for_fills(self):
         """Poll Polymarket for recent trades and detect fills."""
         try:
-            # Get recent trades from Polymarket
+            # Get recent trades from Polymarket (filtered by our address when PROXY_ADDRESS set)
             trades = self.client.get_trades(limit=50)
             
             if not trades:
@@ -982,7 +1153,15 @@ class PolymarketBot:
             
             for trade in trades:
                 trade_id = trade.get("id") or trade.get("trade_id")
-                if not trade_id or trade_id in self._processed_trades:
+                if not trade_id:
+                    # Data API may not include id; build dedup key from content
+                    aid = trade.get("asset_id") or trade.get("token_id") or trade.get("asset")
+                    ts = trade.get("timestamp")
+                    if aid and ts is not None:
+                        trade_id = f"{aid}_{trade.get('side')}_{trade.get('price')}_{trade.get('size')}_{ts}"
+                    else:
+                        continue
+                if trade_id in self._processed_trades:
                     continue
                 
                 # Mark as processed
@@ -993,27 +1172,57 @@ class PolymarketBot:
                     self._processed_trades = set(list(self._processed_trades)[-200:])
                 
                 # Find matching order in our order manager
-                token_id = trade.get("asset_id") or trade.get("token_id")
-                side = trade.get("side", "").upper()
+                token_id = trade.get("asset_id") or trade.get("token_id") or trade.get("asset")
+                side = (trade.get("side") or "").upper()
                 price = float(trade.get("price", 0))
                 size = float(trade.get("size", 0))
-                trade_order_id = trade.get("order_id") or trade.get("orderID")
-                
-                # Log the fill with strategy info
+                trade_order_id = (
+                    trade.get("order_id") or trade.get("orderID")
+                    or trade.get("maker_order_id") or trade.get("makerOrderId")
+                    or trade.get("taker_order_id") or trade.get("takerOrderId")
+                )
+
+                def _norm_id(oid: str) -> str:
+                    if not oid or not isinstance(oid, str):
+                        return ""
+                    return oid.lower().replace("0x", "").strip()
+
                 order = None
                 strategy_name = "unknown"
 
-                # Only trust fills that link directly to one of our known order IDs.
-                # Matching by token+side can incorrectly attribute other users' trades.
                 if trade_order_id:
+                    # Direct lookup, then try normalized (APIs may use different casing/0x)
                     order = self.order_manager.orders.get(trade_order_id)
+                    if not order:
+                        norm = _norm_id(trade_order_id)
+                        for oid, o in self.order_manager.orders.items():
+                            if _norm_id(oid) == norm:
+                                order = o
+                                break
                     if order:
                         strategy_name = order.metadata.get("strategy", "unknown")
+                if not order and token_id and side and price > 0 and size > 0:
+                    # Fallback: match by token+side; pick best by size+price when multiple
+                    candidates = [
+                        o for o in self.order_manager.orders.values()
+                        if o.is_active
+                        and (o.token_id == token_id or _norm_id(o.token_id or "") == _norm_id(str(token_id or "")))
+                        and (o.side or "").upper() == side
+                        and abs(o.size - size) < 0.5
+                        and abs(o.price - price) < 0.02
+                    ]
+                    if len(candidates) == 1:
+                        order = candidates[0]
+                        strategy_name = order.metadata.get("strategy", "unknown")
+                    elif len(candidates) > 1:
+                        # Pick best match by smallest combined size+price diff
+                        best = min(candidates, key=lambda o: abs(o.size - size) + abs(o.price - price) * 10)
+                        order = best
+                        strategy_name = order.metadata.get("strategy", "unknown")
                 
-                if order:
+                if order and order.is_active:
                     cprint(f"💰 FILL [{strategy_name.upper()}]: {side} {size:.2f} @ ${price:.3f} | {order.market_slug}", "green", attrs=["bold"])
                     
-                    # Trigger fill handler
                     fill_data = {
                         "trade_id": trade_id,
                         "side": side,
@@ -1021,7 +1230,10 @@ class PolymarketBot:
                         "size": size,
                         "token_id": token_id
                     }
-                    self._on_order_fill(order, fill_data)
+                    self.order_manager.process_fill(order.order_id, fill_data)
+                    
+                    # Refresh balance immediately after fill (don't wait for next scheduled refresh)
+                    self._refresh_balance()
                     
                     # Telegram fill alert
                     self.telegram.alert_fill(

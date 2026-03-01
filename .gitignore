@@ -57,4 +57,15 @@ Thumbs.db
 .coverage
 htmlcov/
 
-.sqlite
+# SQLite database files
+data/*.sqlite
+data/*.db
+data/*.sqlite3
+data/*.sqlite-journal
+data/*.sqlite-shm
+data/*.sqlite-wal
+data/*.sqlite-lock
+data/*.sqlite-trace
+data/*.sqlite-trace-lock
+data/*.sqlite-trace-shm
+data/*.sqlite-trace-wal

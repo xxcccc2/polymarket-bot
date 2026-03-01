@@ -289,6 +289,127 @@ class OrderManager:
                 })
         
         return result
+
+    def place_limit_orders_batch(self, orders: List[Dict]) -> List[Dict]:
+        """
+        Place multiple limit orders in a single request when supported.
+
+        Each order dict supports:
+          token_id, side, price, size, order_type, market_slug, metadata
+        """
+        if not orders:
+            return []
+
+        results: List[Dict] = []
+        valid_orders: List[Dict] = []
+        valid_indices: List[int] = []
+        staged_by_token_side: set[tuple[str, str]] = set()
+
+        current_active_count = len(self.get_active_orders())
+        allowed_new = max(0, MAX_ACTIVE_ORDERS - current_active_count)
+
+        for idx, req in enumerate(orders):
+            token_id = req.get("token_id")
+            side = (req.get("side") or "").upper()
+            price = float(req.get("price", 0))
+            size = float(req.get("size", 0))
+            order_type = req.get("order_type", "GTC")
+
+            if not token_id:
+                results.append({"success": False, "error": "Missing token_id"})
+                continue
+            if side not in {"BUY", "SELL"}:
+                results.append({"success": False, "error": f"Invalid side {side}"})
+                continue
+            if price <= 0 or price >= 1:
+                results.append({"success": False, "error": f"Invalid price {price} - must be between 0 and 1"})
+                continue
+            if size <= 0:
+                results.append({"success": False, "error": f"Invalid size {size} - must be positive"})
+                continue
+            if len(valid_orders) >= allowed_new:
+                results.append({"success": False, "error": f"Max active orders ({MAX_ACTIVE_ORDERS}) reached"})
+                continue
+
+            existing_orders = self.get_orders_for_token(token_id)
+            active_for_token = [o for o in existing_orders if o.is_active and o.side == side]
+            if active_for_token:
+                results.append(
+                    {
+                        "success": False,
+                        "error": f"Already have {len(active_for_token)} active {side} order(s) for this token",
+                    }
+                )
+                continue
+
+            staged_key = (token_id, side)
+            if staged_key in staged_by_token_side:
+                results.append(
+                    {
+                        "success": False,
+                        "error": f"Duplicate {side} order in batch for token {token_id}",
+                    }
+                )
+                continue
+
+            staged_by_token_side.add(staged_key)
+            valid_orders.append(
+                {
+                    "token_id": token_id,
+                    "side": side,
+                    "price": price,
+                    "size": size,
+                    "order_type": order_type,
+                    "market_slug": req.get("market_slug", ""),
+                    "metadata": req.get("metadata") or {},
+                }
+            )
+            valid_indices.append(idx)
+            results.append({"success": None})  # placeholder to preserve index order
+
+        if not valid_orders:
+            return results
+
+        batch_results = self.client.place_orders_batch(valid_orders)
+        for i, idx in enumerate(valid_indices):
+            result = batch_results[i] if i < len(batch_results) else {"success": False, "error": "Missing batch result"}
+            req = valid_orders[i]
+
+            if result.get("success"):
+                order_id = result.get("order_id", f"unknown_{int(time.time()*1000)}_{i}")
+                order = Order(
+                    order_id=order_id,
+                    token_id=req["token_id"],
+                    market_slug=req["market_slug"],
+                    side=req["side"],
+                    price=req["price"],
+                    size=req["size"],
+                    order_type=req["order_type"],
+                    status=OrderStatus.OPEN,
+                    metadata=req["metadata"],
+                )
+                self.orders[order_id] = order
+                self.orders_by_token.setdefault(req["token_id"], []).append(order_id)
+                self.total_orders_placed += 1
+                cprint(f"📝 {order}", "cyan")
+                result["order"] = order
+                self._persist_order(order)
+
+                if PAPER_TRADING:
+                    self.process_fill(
+                        order_id,
+                        {
+                            "price": req["price"],
+                            "size": req["size"],
+                            "trade_id": f"paper_fill_{int(time.time()*1000)}",
+                            "side": req["side"],
+                            "token_id": req["token_id"],
+                        },
+                    )
+
+            results[idx] = result
+
+        return results
     
     def cancel_order(self, order_id: str, reason: str = "User requested") -> Dict:
         """
@@ -472,7 +593,20 @@ class OrderManager:
         """
         try:
             exchange_orders = self.client.get_open_orders()
-            exchange_ids = {o.get("id") or o.get("orderID") for o in exchange_orders}
+
+            def _norm(oid) -> str:
+                if not oid:
+                    return ""
+                s = str(oid).lower().replace("0x", "").strip()
+                return s
+
+            exchange_ids = set()
+            for o in exchange_orders:
+                for k in ("id", "orderID", "order_id"):
+                    v = o.get(k)
+                    if v:
+                        exchange_ids.add(str(v))
+                        exchange_ids.add(_norm(v))
             
             # Also fetch recent trades to distinguish fills from cancels
             recent_trades = []
@@ -480,22 +614,35 @@ class OrderManager:
                 recent_trades = self.client.get_trades(limit=100)
             except Exception:
                 pass
-            recent_trade_order_ids = {
-                t.get("order_id") or t.get("orderID", "")
-                for t in recent_trades
-            }
-            
+            def _trade_order_ids(t: dict) -> set:
+                ids = set()
+                for k in ("order_id", "orderID", "maker_order_id", "makerOrderId", "taker_order_id", "takerOrderId"):
+                    v = t.get(k)
+                    if v:
+                        ids.add(str(v))
+                        ids.add(str(v).lower().replace("0x", ""))
+                return ids
+
+            recent_trade_order_ids = set()
+            for t in recent_trades:
+                recent_trade_order_ids |= _trade_order_ids(t)
+
             # Mark orders as filled/cancelled if not on exchange
             for order_id, order in self.orders.items():
-                if order.is_active and order_id not in exchange_ids:
+                norm = _norm(order_id)
+                on_exchange = order_id in exchange_ids or norm in exchange_ids
+                if order.is_active and not on_exchange:
                     if PAPER_TRADING:
                         continue
-                    
-                    # Check if we have a matching trade → filled
-                    if order_id in recent_trade_order_ids:
-                        order.status = OrderStatus.FILLED
-                        order.filled_size = order.size
-                        self.total_orders_filled += 1
+
+                    has_fill = order_id in recent_trade_order_ids or norm in recent_trade_order_ids
+                    if has_fill:
+                        self.process_fill(order_id, {
+                            "trade_id": f"sync_{order_id}",
+                            "side": order.side,
+                            "price": order.price,
+                            "size": order.size,
+                        })
                         cprint(f"🔄 Synced FILL: {order}", "green")
                     else:
                         # No matching trade → likely cancelled by exchange

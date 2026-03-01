@@ -378,6 +378,53 @@ class RiskManager:
     def get_total_exposure(self) -> float:
         """Get total exposure across all positions."""
         return sum(p.market_value for p in self.positions.values())
+
+    def sync_positions_from_api(self, api_positions: list) -> None:
+        """
+        Replace local positions with ground truth from Polymarket Data API.
+        Call periodically to fix exposure when fill detection misses trades.
+        """
+        if not api_positions:
+            return
+        old_token_ids = set(self.positions.keys())
+        self.positions.clear()
+        for p in api_positions:
+            if not isinstance(p, dict):
+                continue
+            size = float(p.get("size", 0) or 0)
+            if size < 0.01:
+                continue
+            token_id = p.get("asset") or p.get("token_id")
+            if not token_id:
+                continue
+            avg_price = float(p.get("avgPrice", 0) or 0)
+            cur_price = float(p.get("curPrice", p.get("currentPrice", avg_price)) or avg_price)
+            current_value = float(p.get("currentValue", 0) or 0)
+            market_slug = p.get("slug") or p.get("title") or ""
+            outcome = (p.get("outcome") or "Yes").upper()
+            side = "YES" if outcome in ("YES", "UP") else "NO"
+            self.positions[token_id] = Position(
+                token_id=token_id,
+                market_slug=market_slug,
+                side=side,
+                size=size,
+                avg_price=avg_price,
+                current_price=cur_price,
+                unrealized_pnl=(cur_price - avg_price) * size if cur_price > 0 else 0,
+            )
+            if self.store:
+                try:
+                    self._persist_position(self.positions[token_id])
+                except Exception:
+                    pass
+        # Remove from store any positions we no longer have
+        new_token_ids = set(self.positions.keys())
+        for tid in old_token_ids - new_token_ids:
+            if self.store:
+                try:
+                    self.store.delete_position(tid)
+                except Exception:
+                    pass
     
     def get_total_unrealized_pnl(self) -> float:
         """Get total unrealized PnL."""

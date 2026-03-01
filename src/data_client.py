@@ -112,6 +112,22 @@ def get_leaderboard(
     return data if isinstance(data, list) else []
 
 
+def get_positions(user: str, limit: int = 100) -> List[Dict]:
+    """
+    Fetch current open positions for a wallet from Data API.
+    Returns list of position dicts with asset, size, avgPrice, currentValue, etc.
+    Use this for ground-truth exposure instead of reconstructing from fills.
+    """
+    if not user or not user.startswith("0x"):
+        return []
+    try:
+        params = {"user": user, "limit": min(limit, 500)}
+        data = _request("GET", "/positions", params=params)
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
 def get_portfolio_value(user: str) -> Optional[float]:
     """
     Get total portfolio value for a wallet (proxy address) from Data API /value.
@@ -190,11 +206,22 @@ def get_balance_total(user: str) -> Optional[float]:
     - On-chain USDC = proxy wallet balance (source of truth for available cash)
     - Data API /value = position value only (market exposure, NOT free USDC)
     When /value shows $0.02 but real balance is $77+, we use on-chain USDC.
+    Fetches both in parallel to reduce latency.
     """
     if not user or not user.startswith("0x"):
         return None
-    on_chain = get_usdc_balance_on_chain(user)
-    position_val = get_portfolio_value(user)
+    import concurrent.futures
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+        f_on_chain = ex.submit(get_usdc_balance_on_chain, user)
+        f_position = ex.submit(get_portfolio_value, user)
+        try:
+            on_chain = f_on_chain.result(timeout=10)
+        except concurrent.futures.TimeoutError:
+            on_chain = None
+        try:
+            position_val = f_position.result(timeout=10)
+        except concurrent.futures.TimeoutError:
+            position_val = None
     # Prefer on-chain when substantial (fixes /value showing $0.02 when balance is $77+)
     if on_chain is not None and on_chain >= 1.0:
         pv = position_val if position_val is not None and position_val > 0 else 0

@@ -195,7 +195,6 @@ class Dashboard:
 
     @staticmethod
     def _render_portfolio(p: PortfolioSnapshot) -> Panel:
-        pnl_style = "green" if p.daily_pnl >= 0 else "red"
         session_pnl = p.balance - p.start_balance
         session_style = "green" if session_pnl >= 0 else "red"
 
@@ -206,10 +205,7 @@ class Dashboard:
         body = Text.from_markup(
             f"Balance  [bold]${p.balance:,.2f}[/]"
             f" ([{session_style}]{session_pnl:+.2f}[/])\n"
-            f"Exposure ${p.exposure:,.2f} ({p.exposure_pct:.1f}%)\n"
-            f"Day P&L  [{pnl_style}]${p.daily_pnl:+.2f}[/]"
-            f"  Orders {p.active_orders}/{p.max_orders}"
-            f"  Fills {p.filled}"
+            f"Exposure ${p.exposure:,.2f} ({p.exposure_pct:.1f}%)"
             f"{throttle_txt}"
         )
         return Panel(body, title="💰 Portfolio", border_style="green", box=box.ROUNDED)
