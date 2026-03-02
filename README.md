@@ -172,6 +172,12 @@ TRACKED_WALLETS=0xabc...,0xdef... python scripts/analyze_wallets.py
 unset http_proxy https_proxy; python scripts/analyze_wallets.py
 ```
 
+**Reverse-engineer top wallets** — deep analysis: price distribution, size vs conviction, outcome preference (UP vs DOWN), inferred playbook:
+
+```bash
+TRACKED_WALLETS=0xabc...,0xdef... python scripts/reverse_engineer_wallets.py
+```
+
 #### 6. Late Money ✅ `late_money`
 Follow informed traders near expiration:
 - Tracks price velocity in final hours

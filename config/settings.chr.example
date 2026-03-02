@@ -80,11 +80,14 @@ TERMINAL_MIN_EDGE_CENTS=3
 # =============================================================================
 COMBO_MIN_EDGE_CENTS=3
 COMBO_COOLDOWN=300
+# Edge-based size: larger violation → larger bet (Kroer et al. 2016)
+# COMBO_EDGE_SIZE_FACTOR=0.5
+# COMBO_EDGE_SIZE_CAP=2.0
 
 # =============================================================================
 # WALLET COPY
 # =============================================================================
-TRACKED_WALLETS=0x1979ae6b7e6534de9c4539d0c205e582ca637c9d,0x1d0034134e339a309700ff2d34e99fa2d48b0313,0xd0d6053c3c37e727402d84c14069780d360993aa
+TRACKED_WALLETS=0x1979ae6b7e6534de9c4539d0c205e582ca637c9d,0x1d0034134e339a309700ff2d34e99fa2d48b0313
 WALLET_COPY_USE_LEADERBOARD=false
 WALLET_COPY_LEADERBOARD_TOP_N=1
 WALLET_COPY_LEADERBOARD_CATEGORY=CRYPTO

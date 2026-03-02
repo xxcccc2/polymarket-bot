@@ -253,6 +253,9 @@ SENTIMENT_COOLDOWN = int(os.getenv("SENTIMENT_COOLDOWN", "300"))
 # =============================================================================
 COMBO_MIN_EDGE_CENTS = int(os.getenv("COMBO_MIN_EDGE_CENTS", "3"))
 COMBO_COOLDOWN = int(os.getenv("COMBO_COOLDOWN", "300"))
+# Edge-based size scaling (Kroer et al. 2016): larger violation → larger bet
+COMBO_EDGE_SIZE_FACTOR = float(os.getenv("COMBO_EDGE_SIZE_FACTOR", "0.5"))
+COMBO_EDGE_SIZE_CAP = float(os.getenv("COMBO_EDGE_SIZE_CAP", "2.0"))
 
 # =============================================================================
 # WALLET COPY (Track best traders)

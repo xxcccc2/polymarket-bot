@@ -211,7 +211,7 @@ class Dashboard:
 
         lines = [
             f"Balance  [bold]${p.balance:,.2f}[/] ([{session_style}]{session_pnl:+.2f}[/])",
-            f"Orders   {p.active_orders}/{p.max_orders}  |  Fill {p.filled} ({p.fill_rate:.0f}%)",
+            f"Orders   {p.active_orders}  |  Fill {p.filled} ({p.fill_rate:.0f}%)",
         ]
 
         if p.throttle < 1.0:
@@ -222,16 +222,6 @@ class Dashboard:
             age = p.balance_age_seconds
             if age > p.balance_stale_max_seconds:
                 lines.append(f"⚠️  [red]Balance stale {int(age)}s[/]")
-
-        # Last sync times
-        sync_parts = []
-        if p.last_balance_sync_ts > 0:
-            sync_parts.append(f"bal {int(p.balance_age_seconds)}s ago")
-        if p.last_positions_sync_ts > 0:
-            pos_age = int(time.time() - p.last_positions_sync_ts)
-            sync_parts.append(f"pos {pos_age}s ago")
-        if sync_parts:
-            lines.append(f"[dim]Sync: {', '.join(sync_parts)}[/]")
 
         body = Text.from_markup("\n".join(lines))
         return Panel(body, title="💰 Portfolio", border_style="green", box=box.ROUNDED)
@@ -247,16 +237,13 @@ class Dashboard:
         table.add_column("Strategy", style="bold", ratio=3)
         table.add_column("Sig", justify="right", ratio=1)
         table.add_column("Trades", justify="right", ratio=1)
-        table.add_column("", justify="center", width=3)
         table.add_column("Status", justify="left", ratio=2)
 
         for r in rows:
-            health = "✅" if r.healthy else "⏸️"
             table.add_row(
                 r.name,
                 str(r.signals),
                 str(r.trades),
-                health,
                 r.status or "—",
             )
 

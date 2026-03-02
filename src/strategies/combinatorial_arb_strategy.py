@@ -40,6 +40,8 @@ from ..config import (
     ORDER_SIZE_USD,
     MAX_POSITION_USD,
     TRADING_FEE_RATE,
+    COMBO_EDGE_SIZE_FACTOR,
+    COMBO_EDGE_SIZE_CAP,
 )
 
 
@@ -50,6 +52,11 @@ COMBO_MIN_EDGE_CENTS = 3  # 3 cents minimum edge
 
 # Cooldown per market pair (seconds)
 COMBO_COOLDOWN = 300
+
+# Scale size by edge (Kroer et al. 2016: profit ∝ distance to coherence)
+# multiplier = 1 + edge_cents/100 * factor, capped at COMBO_EDGE_SIZE_CAP
+COMBO_EDGE_SIZE_FACTOR = 0.5
+COMBO_EDGE_SIZE_CAP = 2.0
 
 # Minimum confidence
 COMBO_MIN_CONFIDENCE = 0.60
@@ -135,6 +142,10 @@ class CombinatorialArbStrategy(BaseStrategy):
 
         self.min_edge_cents = int(self.config.get("combo_min_edge_cents", COMBO_MIN_EDGE_CENTS))
         self.cooldown = float(self.config.get("combo_cooldown", COMBO_COOLDOWN))
+        self.edge_size_factor = float(
+            self.config.get("combo_edge_size_factor", COMBO_EDGE_SIZE_FACTOR)
+        )
+        self.edge_size_cap = float(self.config.get("combo_edge_size_cap", COMBO_EDGE_SIZE_CAP))
         self.min_confidence = float(self.config.get("combo_min_confidence", COMBO_MIN_CONFIDENCE))
         self.order_size = float(self.config.get("order_size_usd", ORDER_SIZE_USD))
         self.fee_rate = float(self.config.get("combo_fee_rate", COMBO_FEE_RATE))
@@ -324,56 +335,66 @@ class CombinatorialArbStrategy(BaseStrategy):
 
         For "above" direction: P(X > 100k) <= P(X > 90k) <= P(X > 80k)
         A violation is when a higher threshold has a higher price than a lower one.
+
+        Checks ALL pairs (not just adjacent) to find the maximum edge in a chain
+        (Kroer et al. 2016: profit ∝ distance to coherence).
         """
         violations = []
         markets = group.markets  # Already sorted by threshold ascending
 
-        for i in range(len(markets) - 1):
-            lower_threshold, lower_md = markets[i]
-            higher_threshold, higher_md = markets[i + 1]
+        for i in range(len(markets)):
+            for j in range(i + 1, len(markets)):
+                # i = lower threshold, j = higher threshold (for "above")
+                lower_threshold, lower_md = markets[i]
+                higher_threshold, higher_md = markets[j]
 
-            lower_price = lower_md.best_bid if lower_md.best_bid else (lower_md.last_price or 0)
-            higher_price = higher_md.best_bid if higher_md.best_bid else (higher_md.last_price or 0)
+                lower_price = lower_md.best_bid if lower_md.best_bid else (lower_md.last_price or 0)
+                higher_price = higher_md.best_bid if higher_md.best_bid else (higher_md.last_price or 0)
 
-            if lower_price <= 0 or higher_price <= 0:
-                continue
+                if lower_price <= 0 or higher_price <= 0:
+                    continue
 
-            if group.direction == "above":
-                # P(X > higher) should be <= P(X > lower)
-                # Violation: P(X > higher) > P(X > lower)
-                if higher_price > lower_price:
-                    edge = higher_price - lower_price
-                    edge_after_fees = edge - (2 * self.fee_rate * self.order_size / self.order_size)
-                    edge_cents = int(edge * 100)
+                if group.direction == "above":
+                    # P(X > higher) should be <= P(X > lower)
+                    # Violation: P(X > higher) > P(X > lower)
+                    if higher_price > lower_price:
+                        edge = higher_price - lower_price
+                        edge_cents = int(edge * 100)
 
-                    if edge_cents >= self.min_edge_cents:
-                        violations.append({
-                            "type": "monotonicity",
-                            "overpriced": (higher_threshold, higher_md, higher_price),
-                            "underpriced": (lower_threshold, lower_md, lower_price),
-                            "edge": edge,
-                            "edge_cents": edge_cents,
-                            "direction": group.direction,
-                        })
+                        if edge_cents >= self.min_edge_cents:
+                            violations.append({
+                                "type": "monotonicity",
+                                "overpriced": (higher_threshold, higher_md, higher_price),
+                                "underpriced": (lower_threshold, lower_md, lower_price),
+                                "edge": edge,
+                                "edge_cents": edge_cents,
+                                "direction": group.direction,
+                            })
 
-            elif group.direction == "below":
-                # P(X < lower) should be <= P(X < higher)
-                # Violation: P(X < lower) > P(X < higher)
-                if lower_price > higher_price:
-                    edge = lower_price - higher_price
-                    edge_cents = int(edge * 100)
+                elif group.direction == "below":
+                    # P(X < lower) should be <= P(X < higher)
+                    # Violation: P(X < lower) > P(X < higher)
+                    if lower_price > higher_price:
+                        edge = lower_price - higher_price
+                        edge_cents = int(edge * 100)
 
-                    if edge_cents >= self.min_edge_cents:
-                        violations.append({
-                            "type": "monotonicity",
-                            "overpriced": (lower_threshold, lower_md, lower_price),
-                            "underpriced": (higher_threshold, higher_md, higher_price),
-                            "edge": edge,
-                            "edge_cents": edge_cents,
-                            "direction": group.direction,
-                        })
+                        if edge_cents >= self.min_edge_cents:
+                            violations.append({
+                                "type": "monotonicity",
+                                "overpriced": (lower_threshold, lower_md, lower_price),
+                                "underpriced": (higher_threshold, higher_md, higher_price),
+                                "edge": edge,
+                                "edge_cents": edge_cents,
+                                "direction": group.direction,
+                            })
 
-        return violations
+        # Keep only the violation with max edge per underpriced token (we buy underpriced)
+        seen_under: Dict[str, Dict] = {}
+        for v in violations:
+            under_token = v["underpriced"][1].token_id or ""
+            if under_token not in seen_under or v["edge_cents"] > seen_under[under_token]["edge_cents"]:
+                seen_under[under_token] = v
+        return list(seen_under.values())
 
     def _create_signals(self, violation: Dict, group: MarketGroup, now: float) -> List[Signal]:
         """Create buy/sell signals from a monotonicity violation."""
@@ -405,7 +426,11 @@ class CombinatorialArbStrategy(BaseStrategy):
 
         # Signal 1: Buy the underpriced market (should be more expensive)
         if COMBO_MIN_BUY_PRICE < under_price < COMBO_MAX_BUY_PRICE:
-            size_shares = self.order_size / under_price if under_price > 0 else 0
+            # Scale size by edge (Kroer et al. 2016: profit ∝ distance to coherence)
+            size_mult = 1.0 + (edge_cents / 100.0) * self.edge_size_factor
+            size_mult = min(size_mult, self.edge_size_cap)
+            effective_size = self.order_size * size_mult
+            size_shares = effective_size / under_price if under_price > 0 else 0
             if size_shares >= 0.1:
                 signals.append(Signal(
                     signal_type=SignalType.BUY,
