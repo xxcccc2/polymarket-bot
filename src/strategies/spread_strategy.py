@@ -84,6 +84,10 @@ class SpreadStrategy(BaseStrategy):
         self._vol_regime = "normal"
         self._effective_min_spread = self.min_spread_cents
 
+        # Throttle repeated order-failure logs (once per 15s per error type)
+        self._order_fail_log_ts: Dict[str, float] = {}
+        self._order_fail_throttle_sec = 15
+
         # Per-market implied vol cache {token_id: sigma_b}
         self._sigma_cache: Dict[str, float] = {}
         self._use_native: bool = False
@@ -370,7 +374,19 @@ class SpreadStrategy(BaseStrategy):
                     
                     cprint(f"✅ Order placed: {order_id}", "green")
                 else:
-                    cprint(f"❌ Order failed: {order_result.get('error')}", "red")
+                    err = order_result.get("error") or ""
+                    # Throttle repeated "Max active orders" / "Already have" logs
+                    throttle_key = "max_active" if "Max active orders" in err else ("already_have" if "Already have" in err else None)
+                    now = _time.time()
+                    if throttle_key:
+                        last = self._order_fail_log_ts.get(throttle_key, 0)
+                        if now - last < self._order_fail_throttle_sec:
+                            pass  # skip log
+                        else:
+                            self._order_fail_log_ts[throttle_key] = now
+                            cprint(f"❌ Order failed: {err}", "red")
+                    else:
+                        cprint(f"❌ Order failed: {err}", "red")
                 
                 results.append(order_result)
                 

@@ -411,7 +411,7 @@ polymarket-bot/
 | 2 | ✅ Complete | Binance feed, Kelly sizing, 3 BTC 5-min strategies, vol-regime |
 | 3 | ✅ Complete | Strategy analytics, adaptive risk, drawdown throttling |
 | 4 | ✅ Complete | Telegram alerts, order lifecycle fixes, deployment hardening |
-| 5 | ✅ Complete | VPIN smart money, sentiment pipeline, combinatorial arb |
+| 5 | ✅ Complete | VPIN smart money, sentiment pipeline, combinatorial arb, wallet copy |
 | 6 | ✅ Complete | bs-p native engine: A-S quoting, inventory Kelly, portfolio Greeks, shock testing |
 
 ## Adding New Strategies

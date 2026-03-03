@@ -820,11 +820,15 @@ class PolymarketBot:
                     and any(kw in mtext for kw in BTC_5MIN_KEYWORDS)
                 )
                 
-                # Skip if no valid prices (exempt BTC short-term — use 50/50 default)
+                # Skip if no valid prices
+                # BTC short-term: use 50/50 only when we have *some* price (stale data).
+                # When best_bid=0 AND best_ask=0 → no orderbook → skip (avoids 24h-out empty markets)
                 if best_bid <= 0 or best_ask <= 0 or best_ask >= 1:
                     if is_btc_st:
-                        best_bid = 0.50
-                        best_ask = 0.52
+                        if best_bid <= 0 and (best_ask <= 0 or best_ask >= 1):
+                            continue  # no real book
+                        best_bid = 0.50 if best_bid <= 0 else best_bid
+                        best_ask = 0.52 if best_ask <= 0 or best_ask >= 1 else best_ask
                     else:
                         continue
                 
