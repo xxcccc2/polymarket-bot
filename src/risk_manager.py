@@ -155,6 +155,10 @@ class RiskManager:
         
         # Throttle state
         self._throttle_factor: float = 1.0   # 1.0 = normal, 0.5 = half size, 0.0 = halt
+
+        # Portfolio Greeks (updated by compute_portfolio_greeks)
+        self.net_delta: float = 0.0
+        self.net_gamma: float = 0.0
         
         # Callbacks
         self._risk_callbacks: List[Callable[[RiskLevel, str], None]] = []
@@ -372,7 +376,17 @@ class RiskManager:
         total_exposure = self.get_total_exposure()
         if total_exposure + size_usd > max_exp:
             return False, f"Would exceed total exposure: ${total_exposure + size_usd:.0f} > ${max_exp:.0f}"
-        
+
+        # Pre-trade shock test (additive gate — only rejects extreme risk)
+        shares = size_usd / price if price > 0 else 0
+        approved, worst_pnl, reason = self.pre_trade_shock_test(
+            token_id=token_id,
+            proposed_size=shares,
+            proposed_price=price,
+        )
+        if not approved:
+            return False, reason
+
         return True, "OK"
     
     def get_total_exposure(self) -> float:
@@ -598,6 +612,118 @@ class RiskManager:
             self.risk_level = RiskLevel.NORMAL
             self._throttle_factor = 1.0
     
+    # ------------------------------------------------------------------
+    # bs-p portfolio analytics (Greeks + shock testing)
+    # ------------------------------------------------------------------
+
+    def compute_portfolio_greeks(self) -> None:
+        """Recompute portfolio-level delta and gamma from all open positions.
+
+        Stores results in ``self.net_delta`` and ``self.net_gamma``.
+        Lightweight enough to call every scan cycle.
+        """
+        if not self.positions:
+            self.net_delta = 0.0
+            self.net_gamma = 0.0
+            return
+
+        try:
+            from .native.pmkernel import (
+                NATIVE_AVAILABLE, logit_batch, greeks_batch,
+                aggregate_portfolio_greeks,
+            )
+            import numpy as np
+
+            if not NATIVE_AVAILABLE:
+                self.net_delta = 0.0
+                self.net_gamma = 0.0
+                return
+
+            pos_list = list(self.positions.values())
+            n = len(pos_list)
+            prices = np.array([max(0.01, min(0.99, p.current_price)) for p in pos_list], dtype=np.float64)
+            sizes = np.array([p.size for p in pos_list], dtype=np.float64)
+
+            x = logit_batch(prices)
+            delta_arr, gamma_arr = greeks_batch(x)
+
+            result = aggregate_portfolio_greeks(sizes, delta_arr, gamma_arr)
+            self.net_delta = result.net_delta
+            self.net_gamma = result.net_gamma
+
+        except Exception:
+            self.net_delta = 0.0
+            self.net_gamma = 0.0
+
+    def pre_trade_shock_test(
+        self,
+        token_id: str,
+        proposed_size: float,
+        proposed_price: float,
+        sigma_b: float = 0.5,
+        gamma: float = 1.0,
+        tau: float = 0.05,
+        k: float = 2.0,
+    ) -> tuple[bool, float, str]:
+        """Run a stress test before opening a new position.
+
+        Simulates +-5% and +-10% probability shocks on the full portfolio
+        (including the proposed trade) and checks whether worst-case PnL
+        would breach 50% of the remaining daily loss budget.
+
+        Returns:
+            ``(approved, worst_case_pnl, reason)``
+        """
+        try:
+            from .native.pmkernel import NATIVE_AVAILABLE, simulate_shock
+            import numpy as np
+
+            if not NATIVE_AVAILABLE:
+                return True, 0.0, "native engine unavailable — skipping shock test"
+
+            pos_list = list(self.positions.values())
+            n = len(pos_list) + 1  # existing + proposed
+
+            prices = np.array(
+                [max(0.01, min(0.99, p.current_price)) for p in pos_list] + [proposed_price],
+                dtype=np.float64,
+            )
+            from .native.pmkernel import logit_batch
+            x_arr = logit_batch(prices)
+
+            q_arr = np.array(
+                [p.size for p in pos_list] + [proposed_size],
+                dtype=np.float64,
+            )
+            sigma_arr = np.full(n, sigma_b, dtype=np.float64)
+            gamma_arr = np.full(n, gamma, dtype=np.float64)
+            tau_arr = np.full(n, tau, dtype=np.float64)
+            k_arr = np.full(n, k, dtype=np.float64)
+
+            daily_budget = self._get_daily_loss_limit()
+            stats = self._get_or_create_daily_stats()
+            remaining = daily_budget + stats.realized_pnl  # realized_pnl is negative when losing
+
+            worst = 0.0
+            for shock_val in [-0.10, -0.05, 0.05, 0.10]:
+                shock_arr = np.full(n, shock_val, dtype=np.float64)
+                result = simulate_shock(x_arr, q_arr, sigma_arr, gamma_arr, tau_arr, k_arr, shock_arr)
+                total_pnl = float(result.pnl_shift.sum())
+                if total_pnl < worst:
+                    worst = total_pnl
+
+            if remaining > 0 and abs(worst) > 0.5 * remaining:
+                return (
+                    False,
+                    worst,
+                    f"Shock test failed: worst PnL ${worst:.2f} exceeds 50% of remaining daily budget ${remaining:.2f}",
+                )
+
+            return True, worst, "shock test passed"
+
+        except Exception as e:
+            return True, 0.0, f"shock test error: {e}"
+
     def get_status(self) -> Dict:
         """Get current risk status."""
         stats = self._get_or_create_daily_stats()
@@ -626,6 +752,8 @@ class RiskManager:
             "dynamic_max_exposure": round(max_exp, 2),
             "dynamic_daily_loss_limit": round(self._get_daily_loss_limit(), 2),
             "dynamic_order_size": self.get_adaptive_order_size(),
+            "net_delta": round(self.net_delta, 4),
+            "net_gamma": round(self.net_gamma, 4),
         }
     
     def print_status(self):

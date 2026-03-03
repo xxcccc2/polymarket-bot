@@ -1,16 +1,17 @@
 # Polymarket Trading Bot
 
-An institutional-grade algorithmic trading platform for Polymarket prediction markets, with real-time Binance cross-asset signals, wallet-copy automation, adaptive risk management, and Telegram alerts.
+An institutional-grade algorithmic trading platform for Polymarket prediction markets, powered by the **bs-p native math engine** for theoretically optimal quoting and sizing.
 
 ## Features
 
+- **bs-p Native Engine** — C math library (Avellaneda-Stoikov quoting, inventory-aware Kelly, portfolio Greeks, shock testing) loaded via ctypes with automatic pure-Python fallback
 - **12 Trading Strategies** — from wallet-copy to cross-asset latency arb
 - **Binance BTC Feed** — real-time VWAP, volatility, and price velocity for 5-min BTC markets
-- **Adaptive Risk Manager** — bankroll-proportional limits, drawdown throttling, auto-halt
+- **Adaptive Risk Manager** — bankroll-proportional limits, drawdown throttling, portfolio Greeks monitoring, pre-trade shock testing, auto-halt
 - **Multi-Wallet Profiles** — run CHR/BB/etc. concurrently from one shared config file
 - **Strategy Analytics** — per-strategy P&L, Sharpe ratio, win rate, streaks, auto-disable losers
-- **Telegram Alerts** — fills, risk events, daily summaries pushed to your phone
-- **Kelly Criterion Sizing** — mathematically optimal position sizing with safety caps
+- **Telegram Alerts** — fills, risk events, Greeks threshold alerts, daily summaries
+- **Inventory-Aware Kelly Sizing** — position sizes shrink as existing inventory grows, preventing over-concentration
 - **Paper Trading** — full simulation mode, zero risk
 - **Order Lifecycle** — tracking, duplicate prevention, stale cleanup, graceful shutdown cancellation
 - **Wallet Analysis** — reverse-engineer tracked wallets to infer strategies (markets, sizing, horizons)
@@ -26,7 +27,24 @@ source venv/bin/activate  # macOS/Linux
 pip install -r requirements.txt
 ```
 
-### 2. Configure Environment
+### 2. Build the Native Math Engine (Optional but Recommended)
+
+```bash
+./scripts/build_native.sh
+```
+
+This compiles `libpmkernel` from the sibling `bs-p/` repo and copies it to `lib/`.
+Requires only a C compiler (`cc` / `clang` / `gcc`).  If the library isn't found
+at runtime, all functions fall back to pure-Python automatically.
+
+Verify:
+
+```bash
+./venv/bin/python -c "from src.native.pmkernel import NATIVE_AVAILABLE; print(NATIVE_AVAILABLE)"
+# True
+```
+
+### 3. Configure Environment
 
 ```bash
 cp env.example .env
@@ -51,7 +69,7 @@ Optional (recommended for multi-wallet):
   - `POLYMARKET_PROXY_ADDRESS_<ID>`
   - `SIGNATURE_TYPE_<ID>`
 
-### 3. Run the Bot
+### 4. Run the Bot
 
 ```bash
 # Paper test with recommended BTC 5-min strategies (default)
@@ -69,10 +87,15 @@ Optional (recommended for multi-wallet):
 # Force paper mode
 ./venv/bin/python -m src.bot --paper
 
-# Multi-wallet live runs (two processes)
-BOT_PUBLIC_CONFIG_FILE=./config/settings.walletcopy.multiwallet.example BOT_WALLET_ID=CHR ./venv/bin/python -m src.bot --strategy wallet_copy
-BOT_PUBLIC_CONFIG_FILE=./config/settings.walletcopy.multiwallet.example BOT_WALLET_ID=BB  ./venv/bin/python -m src.bot --strategy wallet_copy
+# bs-p spread + OBI with native engine (CHR wallet, paper first)
+BOT_PUBLIC_CONFIG_FILE=./config/settings.chr.live BOT_WALLET_ID=CHR PAPER_TRADING=true caffeinate -i ./venv/bin/python -m src.bot --strategy all
+
+# Multi-wallet live (two processes)
+BOT_PUBLIC_CONFIG_FILE=./config/settings.chr.live BOT_WALLET_ID=CHR caffeinate -i ./venv/bin/python -m src.bot --strategy all
+BOT_PUBLIC_CONFIG_FILE=./config/settings.bb.live BOT_WALLET_ID=BB caffeinate -i ./venv/bin/python -m src.bot --strategy all
 ```
+
+Flags: `-i` prevents idle sleep, `-d` prevents display sleep.
 
 ## Configuration
 
@@ -94,19 +117,31 @@ Key settings:
 | `DAILY_LOSS_LIMIT_USD` | `50` | Circuit breaker |
 | `SCAN_INTERVAL_SECONDS` | `5` | Time between strategy scans |
 
+### bs-p Native Engine
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `NATIVE_ENGINE_ENABLED` | `true` | Master kill-switch (false = pure-Python fallback) |
+| `PMKERNEL_LIB_PATH` | auto | Path to `libpmkernel.dylib/.so` |
+| `QUOTING_GAMMA` | `1.0` | Risk aversion (higher = wider spreads, safer) |
+| `QUOTING_K` | `2.0` | Liquidity/arrival rate (higher = tighter) |
+| `QUOTING_TAU_DEFAULT` | `0.05` | Default time-to-resolution (fraction of day) |
+| `GREEKS_DELTA_ALERT` | `0.3` | Telegram alert if `|net_delta|` exceeds this |
+| `GREEKS_GAMMA_ALERT` | `0.2` | Telegram alert if `|net_gamma|` exceeds this |
+
 ### Adaptive Risk (Phase 3)
 
 When `ADAPTIVE_RISK_ENABLED=true`, limits scale with current balance and drawdown state:
 
-| Metric | % of Bankroll | With $79 |
-|--------|---------------|----------|
-| Max per trade | 4% | ~$3.17 |
-| Max per market | 12% | ~$9.52 |
-| Max total exposure | 30% | ~$23.79 |
-| Daily loss limit | 6% | ~$4.76 |
+| Metric | % of Bankroll | With $304 |
+|--------|---------------|-----------|
+| Max per trade | 3% | ~$9.12 |
+| Max per market | 12% | ~$36.48 |
+| Max total exposure | 30% | ~$91.20 |
+| Daily loss limit | 6% | ~$18.24 |
 | Drawdown throttle | configurable | Reduces size progressively |
 | Drawdown halt | configurable | Full stop |
-| Balance floor | 70% | ~$55.51 |
+| Balance floor | 70% | ~$212.80 |
 
 Related controls:
 - `ADAPTIVE_MAX_POSITION_PCT`
@@ -142,11 +177,21 @@ Buy near-certain outcomes in the last 60 seconds before expiry:
 - Small edge per trade, high frequency on 5-min markets
 - Minimal capital at risk per position
 
-#### 3. Orderbook Imbalance ✅ `orderbook_imbalance`
-Detect bid/ask pressure with Binance confirmation:
-- Measures orderbook skew on Polymarket
+#### 3. Spread Farming ✅ `spread` (bs-p Avellaneda-Stoikov)
+**Primary edge with bs-p.** Theoretically optimal bid/ask quoting that accounts for inventory, volatility, and market depth:
+- `calculate_quotes_logit` computes inventory-aware optimal bid/ask (prices skew when you hold a position)
+- Implied belief volatility bootstrapped from observed market spreads on startup
+- Risk aversion (`gamma`) scales inversely with bankroll growth
+- Falls back to manual bid+improvement logic when native engine unavailable
+- Requires: bs-p native engine built (`./scripts/build_native.sh`)
+
+#### 4. Orderbook Imbalance ✅ `orderbook_imbalance` (bs-p enhanced)
+Detect bid/ask pressure with native microstructure analysis:
+- bs-p `order_book_microstructure_batch` computes proper OBI, VWAP mid, and directional pressure from real orderbook depth
 - Confirms direction with Binance BTC momentum
-- Only fires when both signals agree
+- VWAP mid-price replaces naive `(bid+ask)/2` for more accurate reference
+- Falls back to spread-asymmetry heuristic when orderbook data unavailable
+- Requires: `ENABLE_WEBSOCKET_FEED=true` for real orderbook data
 
 #### 4. Stink Bid ✅ `stink_bid`
 Passive asymmetric bets — $1 bids for potential 100x:
@@ -207,17 +252,6 @@ Exploit logical pricing violations across related markets:
 - Groups by asset + direction, checks monotonicity constraints
 - P(BTC > $100k) must be ≤ P(BTC > $90k) — violations = free money
 - $40M+ extracted from Polymarket via this edge (Milionis et al. 2024)
-
-### Disabled by Default (capital-inefficient for <$500)
-
-#### 9. Spread Strategy `spread`
-Micro-spread farming. Disabled: adverse selection eats small accounts alive.
-
-#### 11. Favorite-Longshot Bias `favorite_longshot`
-Buy favorites at 85-95¢. Disabled: locks up too much capital.
-
-#### 12. Cross-Platform Arbitrage `cross_platform_arbitrage`
-Polymarket vs Kalshi arb. Disabled: requires Kalshi infrastructure.
 
 ### Strategy Modes
 
@@ -291,13 +325,15 @@ The bot tracks per-strategy performance in real time:
 
 On shutdown, a **scorecard** is printed showing every strategy's metrics.
 
-### Adaptive Risk Manager (Phase 3)
+### Adaptive Risk Manager (Phase 3 + Phase 6)
 
 When enabled, all risk limits scale dynamically with your balance:
 - Lose money → limits tighten automatically
 - Make money → limits expand proportionally
 - **Drawdown throttle** at -5% → trade sizes cut to 50%
 - **Drawdown halt** at -12% → all trading stopped
+- **Portfolio Greeks** — net delta/gamma computed every scan cycle (Phase 6)
+- **Pre-trade shock test** — simulates +-5%/+-10% probability shocks before each trade; rejects if worst-case PnL exceeds 50% of remaining daily loss budget (Phase 6)
 - **Balance floor** at 70% of starting balance → nuclear stop
 - Never touch disabled strategies regardless of performance
 
@@ -315,47 +351,53 @@ When enabled, all risk limits scale dynamically with your balance:
 ```
 polymarket-bot/
 ├── scripts/
-│   └── analyze_wallets.py       # Reverse-engineer wallets to infer strategies
+│   ├── analyze_wallets.py        # Reverse-engineer wallets to infer strategies
+│   └── build_native.sh           # Build bs-p libpmkernel and install to lib/
+├── lib/                          # Compiled native library (gitignored)
+│   └── libpmkernel.dylib         # macOS — or .so on Linux
 ├── src/
 │   ├── bot.py                    # Main orchestrator
 │   ├── client.py                 # Polymarket CLOB client
-│   ├── config.py                 # All configuration
+│   ├── config.py                 # All configuration (incl. bs-p params)
 │   ├── order_manager.py          # Order lifecycle
-│   ├── risk_manager.py           # Adaptive risk controls
+│   ├── risk_manager.py           # Adaptive risk + portfolio Greeks + shock testing
 │   ├── persistence.py            # SQLite state store
+│   ├── dashboard.py              # TUI with Risk Engine panel
 │   ├── websocket_feed.py         # Polymarket WebSocket
-│   ├── kalshi_client.py          # Kalshi REST client
 │   ├── logging_utils.py          # Colored console output
+│   ├── native/                   # bs-p FFI bridge
+│   │   ├── __init__.py
+│   │   └── pmkernel.py           # ctypes wrapper (sigmoid, logit, quotes, kelly, greeks)
 │   ├── feeds/
 │   │   └── binance_ws.py         # Binance BTC/USDT real-time feed
 │   ├── sizing/
-│   │   └── kelly.py              # Kelly Criterion position sizing
+│   │   └── kelly.py              # Inventory-aware Kelly sizing (bs-p enhanced)
 │   ├── analytics/
 │   │   └── strategy_tracker.py   # Per-strategy P&L, Sharpe, health
 │   ├── alerts/
-│   │   └── telegram.py           # Telegram push notifications
+│   │   └── telegram.py           # Telegram notifications (incl. Greeks alerts)
 │   └── strategies/
 │       ├── base_strategy.py              # Abstract base class
-│       ├── spread_strategy.py            # Spread farming (vol-regime aware)
-│       ├── arbitrage_strategy.py         # YES+NO < $1 arb
-│       ├── stink_bid_strategy.py         # 1¢ limit bids
-│       ├── favorite_longshot_strategy.py # Bias exploitation
-│       ├── late_money_strategy.py        # Price velocity signals
+│       ├── spread_strategy.py            # Avellaneda-Stoikov quoting (bs-p)
+│       ├── orderbook_imbalance_strategy.py   # Native OBI + VWAP mid (bs-p)
 │       ├── cross_asset_strategy.py       # Binance → Polymarket latency arb
 │       ├── terminal_convergence_strategy.py  # Near-expiry convergence
-│       ├── orderbook_imbalance_strategy.py   # Bid/ask pressure
-│       ├── cross_platform_arbitrage_strategy.py  # Polymarket vs Kalshi
-│       ├── vpin_strategy.py                      # Informed flow detection
-│       ├── sentiment_strategy.py                 # News sentiment divergence
-│       ├── combinatorial_arb_strategy.py         # Logical pricing constraints
-│       └── wallet_copy_strategy.py               # Copy top traders
-├── data/                   # Runtime data (gitignored)
-├── logs/                   # Log files (gitignored)
+│       ├── wallet_copy_strategy.py       # Copy top traders
+│       └── ...                           # + 7 more strategies
+├── tests/
+│   └── unit/
+│       ├── test_native_engine.py         # bs-p bridge + parity tests
+│       └── ...
+├── config/
+│   ├── settings.chr.live.example         # CHR wallet bs-p config template
+│   └── settings.bb.example
 ├── docs/
-│   ├── CODE_REVIEW.md
-│   ├── STRATEGY_ROADMAP.md
+│   ├── bs-p/
+│   │   ├── bs-p_integration_plan_*.md    # Full integration plan
+│   │   ├── deployment-guide.md           # Testing → paper → live guide
+│   │   └── What your bot already does well.md
 │   ├── to-do.md
-│   └── knowledge/          # Academic research & references
+│   └── knowledge/
 ├── env.example
 ├── requirements.txt
 └── README.md
@@ -370,6 +412,7 @@ polymarket-bot/
 | 3 | ✅ Complete | Strategy analytics, adaptive risk, drawdown throttling |
 | 4 | ✅ Complete | Telegram alerts, order lifecycle fixes, deployment hardening |
 | 5 | ✅ Complete | VPIN smart money, sentiment pipeline, combinatorial arb |
+| 6 | ✅ Complete | bs-p native engine: A-S quoting, inventory Kelly, portfolio Greeks, shock testing |
 
 ## Adding New Strategies
 
@@ -426,6 +469,7 @@ python -m src.bot --strategy my_strategy
 - [Polymarket WebSocket](https://docs.polymarket.com/developers/CLOB/websocket)
 - [Binance WebSocket](https://developers.binance.com/docs/binance-spot-api-docs/web-socket-streams)
 - [Telegram Bot API](https://core.telegram.org/bots/api)
+- [bs-p native engine](docs/bs-p/deployment-guide.md) — Avellaneda-Stoikov quoting, Kelly sizing, portfolio Greeks
 
 ## License
 

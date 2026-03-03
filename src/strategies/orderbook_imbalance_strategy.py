@@ -181,7 +181,7 @@ class OrderbookImbalanceStrategy(BaseStrategy):
             buy_price = round(max(0.01, min(0.99, buy_price)), 3)
 
             # Size
-            bet_size = self._size_bet(edge_estimate + data.mid_price, data.mid_price)
+            bet_size = self._size_bet(edge_estimate + data.mid_price, data.mid_price, data.token_id)
             shares = bet_size / buy_price if buy_price > 0 else 0
 
             signal = Signal(
@@ -260,45 +260,74 @@ class OrderbookImbalanceStrategy(BaseStrategy):
     # ------------------------------------------------------------------
 
     @staticmethod
+    def _parse_ob_volumes(orderbook: Optional[Dict]):
+        """Extract total bid/ask volume from top 10 orderbook levels."""
+        if not orderbook:
+            return None, None
+        bids = orderbook.get("bids", [])
+        asks = orderbook.get("asks", [])
+        if not bids and not asks:
+            return None, None
+
+        max_levels = 10
+        bid_vol = 0.0
+        for level in bids[:max_levels]:
+            try:
+                bid_vol += float(level.get("size", level[1]) if isinstance(level, dict) else level[1])
+            except (IndexError, ValueError, TypeError):
+                continue
+        ask_vol = 0.0
+        for level in asks[:max_levels]:
+            try:
+                ask_vol += float(level.get("size", level[1]) if isinstance(level, dict) else level[1])
+            except (IndexError, ValueError, TypeError):
+                continue
+
+        if bid_vol <= 0 and ask_vol <= 0:
+            return None, None
+        return bid_vol, ask_vol
+
+    @staticmethod
     def _calculate_imbalance(orderbook: Optional[Dict], market_data=None):
         """
         Calculate bid/ask volume imbalance from an orderbook dict.
-        Falls back to spread-based proxy when orderbook is unavailable.
+
+        When the native engine is available and real orderbook volumes exist,
+        delegates to ``order_book_microstructure_batch`` for proper OBI, VWAP
+        mid, and directional pressure.  Falls back to a spread-based proxy
+        when orderbook data is unavailable.
 
         Returns:
             (bid_volume, ask_volume, ratio, direction) or None
             direction is "BUY" if bid-heavy, "SELL" if ask-heavy
         """
-        if orderbook:
-            bids = orderbook.get("bids", [])
-            asks = orderbook.get("asks", [])
+        bid_vol, ask_vol = OrderbookImbalanceStrategy._parse_ob_volumes(orderbook)
 
-            if bids or asks:
-                max_levels = 10
+        if bid_vol is not None and market_data is not None:
+            try:
+                from ..native.pmkernel import NATIVE_AVAILABLE, order_book_microstructure
+                if NATIVE_AVAILABLE:
+                    r = order_book_microstructure(
+                        bid_p=market_data.best_bid,
+                        ask_p=market_data.best_ask,
+                        bid_vol=bid_vol,
+                        ask_vol=ask_vol,
+                    )
+                    direction = "BUY" if r.pressure > 0 else "SELL"
+                    ratio = 1.0 + abs(r.pressure)
+                    return bid_vol, ask_vol, ratio, direction
+            except Exception:
+                pass
 
-                bid_vol = 0.0
-                for level in bids[:max_levels]:
-                    try:
-                        bid_vol += float(level.get("size", level[1]) if isinstance(level, dict) else level[1])
-                    except (IndexError, ValueError, TypeError):
-                        continue
-
-                ask_vol = 0.0
-                for level in asks[:max_levels]:
-                    try:
-                        ask_vol += float(level.get("size", level[1]) if isinstance(level, dict) else level[1])
-                    except (IndexError, ValueError, TypeError):
-                        continue
-
-                if bid_vol > 0 or ask_vol > 0:
-                    if ask_vol <= 0:
-                        return bid_vol, ask_vol, 10.0, "BUY"
-                    elif bid_vol <= 0:
-                        return bid_vol, ask_vol, 10.0, "SELL"
-                    elif bid_vol >= ask_vol:
-                        return bid_vol, ask_vol, bid_vol / ask_vol, "BUY"
-                    else:
-                        return bid_vol, ask_vol, ask_vol / bid_vol, "SELL"
+            # Native unavailable — use basic ratio
+            if ask_vol <= 0:
+                return bid_vol, ask_vol, 10.0, "BUY"
+            elif bid_vol <= 0:
+                return bid_vol, ask_vol, 10.0, "SELL"
+            elif bid_vol >= ask_vol:
+                return bid_vol, ask_vol, bid_vol / ask_vol, "BUY"
+            else:
+                return bid_vol, ask_vol, ask_vol / bid_vol, "SELL"
 
         # Fallback: use bid/ask price asymmetry as a proxy
         if market_data is not None and market_data.mid_price > 0:
@@ -306,13 +335,10 @@ class OrderbookImbalanceStrategy(BaseStrategy):
             ask = market_data.best_ask
             mid = market_data.mid_price
             if bid > 0 and ask > 0 and ask > bid:
-                # How close is mid to ask vs bid?
-                # If mid is closer to ask → bid pressure (buyers pushing up)
                 spread = ask - bid
                 if spread > 0.03:
-                    # Wide spread (e.g. default 50/52¢) — not enough info
                     return None
-                bid_pull = (mid - bid) / spread  # 0.5 = centered
+                bid_pull = (mid - bid) / spread
                 if bid_pull > 0.55:
                     return 1.0, 1.0, 1.0 + (bid_pull - 0.5) * 8, "BUY"
                 elif bid_pull < 0.45:
@@ -320,18 +346,21 @@ class OrderbookImbalanceStrategy(BaseStrategy):
 
         return None
 
-    def _size_bet(self, estimated_prob: float, market_prob: float) -> float:
-        """Size using Kelly with fallback."""
+    def _size_bet(self, estimated_prob: float, market_prob: float, token_id: str = "") -> float:
+        """Size using inventory-aware Kelly with fallback."""
         try:
             from ..sizing.kelly import kelly_size
             from ..config import PAPER_BALANCE_USD, PAPER_TRADING
 
             bankroll = PAPER_BALANCE_USD if PAPER_TRADING else 1000.0
+            pos_usd = self.positions.get(token_id, 0.0)
+            inv_q = pos_usd / market_prob if market_prob > 0 else 0.0
             result = kelly_size(
                 estimated_prob=estimated_prob,
                 market_price=market_prob,
                 bankroll=bankroll,
                 max_bet_usd=self.order_size_usd * 2,
+                inventory_q=inv_q,
             )
             if result.bet_size_usd > 0:
                 return result.bet_size_usd

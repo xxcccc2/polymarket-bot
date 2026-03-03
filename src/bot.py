@@ -750,6 +750,21 @@ class PolymarketBot:
             last_positions_sync_ts=self._last_positions_sync_ts,
         )
         
+        # Build Risk Engine snapshot
+        from .dashboard import RiskEngineSnapshot
+        try:
+            from .native.pmkernel import NATIVE_AVAILABLE
+            self.risk_manager.compute_portfolio_greeks()
+            re_snap = RiskEngineSnapshot(
+                native_available=NATIVE_AVAILABLE,
+                engine_label="NATIVE" if NATIVE_AVAILABLE else "PYTHON",
+                net_delta=self.risk_manager.net_delta,
+                net_gamma=self.risk_manager.net_gamma,
+                active_markets=len(self.risk_manager.positions),
+            )
+        except Exception:
+            re_snap = RiskEngineSnapshot()
+
         state = DashboardState(
             paper=PAPER_TRADING,
             n_markets=len(self.markets),
@@ -757,6 +772,7 @@ class PolymarketBot:
             binance=bs,
             strategies=strat_rows,
             portfolio=portfolio,
+            risk_engine=re_snap,
         )
         self.dashboard.update(state)
     
@@ -874,6 +890,13 @@ class PolymarketBot:
 
                     end_ts = self._parse_market_end_ts(market) if is_btc_st else None
 
+                    # Attach orderbook from WebSocket cache if available
+                    ob_data = None
+                    if hasattr(self, 'feed') and self.feed:
+                        ws_ob = self.feed.get_latest_orderbook(token_id)
+                        if ws_ob is not None:
+                            ob_data = {"bids": ws_ob.bids, "asks": ws_ob.asks}
+
                     data = MarketData(
                         token_id=token_id,
                         condition_id=condition_id,
@@ -887,6 +910,7 @@ class PolymarketBot:
                         volume_24h=volume,
                         liquidity=float(market.get("liquidityClob", 0) or 0),
                         last_price=float(market.get("lastTradePrice", t_mid) or t_mid),
+                        orderbook=ob_data,
                         recent_trades=token_trades if token_trades else None,
                         end_date_ts=end_ts,
                     )

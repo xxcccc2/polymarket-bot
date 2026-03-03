@@ -146,11 +146,17 @@ class TelegramAlerter:
     def alert_startup(self, balance: float, strategies: list, mode: str) -> None:
         """Alert on bot startup."""
         strat_list = ", ".join(strategies)
+        try:
+            from ..native.pmkernel import NATIVE_AVAILABLE
+            engine = "libpmkernel (native)" if NATIVE_AVAILABLE else "pure-Python fallback"
+        except Exception:
+            engine = "pure-Python fallback"
         self._enqueue(
             f"🚀 *Bot Started*\n"
             f"Mode: {mode}\n"
             f"Balance: ${balance:.2f}\n"
-            f"Strategies: {strat_list}"
+            f"Strategies: {strat_list}\n"
+            f"Engine: {engine}"
         )
 
     def alert_shutdown(self, reason: str = "User requested") -> None:
@@ -172,6 +178,29 @@ class TelegramAlerter:
         # Give the queue time to flush
         time.sleep(2)
 
+    def alert_greeks(self, net_delta: float, net_gamma: float) -> None:
+        """Alert when portfolio Greeks exceed thresholds."""
+        parts = []
+        if abs(net_delta) > 0.3:
+            parts.append(f"Delta: {net_delta:+.4f}")
+        if abs(net_gamma) > 0.2:
+            parts.append(f"Gamma: {net_gamma:+.4f}")
+        if parts:
+            self._enqueue(
+                f"⚠️ *Portfolio Greeks Alert*\n"
+                + "\n".join(parts)
+                + "\nConsider rebalancing."
+            )
+
+    def alert_shock_rejection(self, token_id: str, worst_pnl: float, reason: str) -> None:
+        """Alert when a trade is rejected by the shock test."""
+        self._enqueue(
+            f"🛡️ *Shock Test Rejected*\n"
+            f"Token: {token_id[:16]}…\n"
+            f"Worst PnL: ${worst_pnl:.2f}\n"
+            f"{reason}"
+        )
+
     def send_daily_summary(self, risk_status: Dict) -> None:
         """Send end-of-day summary."""
         balance = risk_status.get("current_balance", 0)
@@ -179,6 +208,8 @@ class TelegramAlerter:
         trades = risk_status.get("daily_trades", 0)
         exposure = risk_status.get("total_exposure", 0)
         throttle = risk_status.get("throttle_factor", 1.0)
+        net_delta = risk_status.get("net_delta", 0)
+        net_gamma = risk_status.get("net_gamma", 0)
 
         pnl_emoji = "📈" if daily_pnl >= 0 else "📉"
 
@@ -188,7 +219,8 @@ class TelegramAlerter:
             f"{pnl_emoji} Daily P&L: ${daily_pnl:+.2f}\n"
             f"Trades: {trades}\n"
             f"Exposure: ${exposure:.2f}\n"
-            f"Throttle: {throttle*100:.0f}%"
+            f"Throttle: {throttle*100:.0f}%\n"
+            f"Delta: {net_delta:+.4f}  Gamma: {net_gamma:+.4f}"
         )
 
     # ------------------------------------------------------------------

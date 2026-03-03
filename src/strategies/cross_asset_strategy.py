@@ -201,7 +201,7 @@ class CrossAssetStrategy(BaseStrategy):
                 continue
 
             # Size the bet — use Kelly if available, else fixed
-            bet_size_usd = self._size_bet(estimated_prob, market_prob)
+            bet_size_usd = self._size_bet(estimated_prob, market_prob, data.token_id)
             if bet_size_usd <= 0:
                 continue
 
@@ -427,27 +427,27 @@ class CrossAssetStrategy(BaseStrategy):
         # Clamp to valid probability range
         return max(0.01, min(0.99, estimated))
 
-    def _size_bet(self, estimated_prob: float, market_prob: float) -> float:
-        """Size the bet using Kelly or fixed sizing."""
+    def _size_bet(self, estimated_prob: float, market_prob: float, token_id: str = "") -> float:
+        """Size the bet using inventory-aware Kelly or fixed sizing."""
         try:
             from ..sizing.kelly import kelly_size
-
-            # Use paper balance as bankroll estimate
             from ..config import PAPER_BALANCE_USD, PAPER_TRADING
-            bankroll = PAPER_BALANCE_USD if PAPER_TRADING else 1000.0
 
+            bankroll = PAPER_BALANCE_USD if PAPER_TRADING else 1000.0
+            pos_usd = self.positions.get(token_id, 0.0)
+            inv_q = pos_usd / market_prob if market_prob > 0 else 0.0
             result = kelly_size(
                 estimated_prob=estimated_prob,
                 market_price=market_prob,
                 bankroll=bankroll,
                 max_bet_usd=self.order_size_usd * 3,
+                inventory_q=inv_q,
             )
             if result.bet_size_usd > 0:
                 return result.bet_size_usd
         except Exception:
             pass
 
-        # Fallback to fixed sizing
         return self.order_size_usd
 
     def get_state(self) -> Dict[str, Any]:

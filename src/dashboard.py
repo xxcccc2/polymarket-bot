@@ -98,6 +98,19 @@ class PortfolioSnapshot:
 
 
 @dataclass
+class RiskEngineSnapshot:
+    native_available: bool = False
+    engine_label: str = "PYTHON"
+    net_delta: float = 0.0
+    net_gamma: float = 0.0
+    active_markets: int = 0
+    sigma_avg: float = 0.0
+    shock_tests_passed: int = 0
+    shock_tests_total: int = 0
+    kelly_scale: float = 1.0
+
+
+@dataclass
 class DashboardState:
     """Everything the dashboard needs to render one frame."""
     paper: bool = True
@@ -107,6 +120,7 @@ class DashboardState:
     binance: BinanceSnapshot = field(default_factory=BinanceSnapshot)
     strategies: List[StrategyRow] = field(default_factory=list)
     portfolio: PortfolioSnapshot = field(default_factory=PortfolioSnapshot)
+    risk_engine: RiskEngineSnapshot = field(default_factory=RiskEngineSnapshot)
 
 
 # ---------------------------------------------------------------------------
@@ -165,6 +179,7 @@ class Dashboard:
                 equal=True,
                 expand=True,
             ),
+            self._render_risk_engine(s.risk_engine),
             self._render_strategies(s.strategies),
             self._render_logs(),
         )
@@ -225,6 +240,25 @@ class Dashboard:
 
         body = Text.from_markup("\n".join(lines))
         return Panel(body, title="💰 Portfolio", border_style="green", box=box.ROUNDED)
+
+    @staticmethod
+    def _render_risk_engine(r: RiskEngineSnapshot) -> Panel:
+        engine_style = "green" if r.native_available else "yellow"
+        delta_style = "red" if abs(r.net_delta) > 0.3 else "green"
+        gamma_style = "red" if abs(r.net_gamma) > 0.2 else "green"
+
+        shock_txt = f"{r.shock_tests_passed}/{r.shock_tests_total} passed" if r.shock_tests_total else "—"
+        sigma_txt = f"{r.sigma_avg:.2f}" if r.sigma_avg > 0 else "—"
+
+        lines = [
+            f"Engine: [{engine_style}]{r.engine_label}[/]",
+            f"Portfolio Delta: [{delta_style}]{r.net_delta:+.4f}[/]  "
+            f"Gamma: [{gamma_style}]{r.net_gamma:+.4f}[/]",
+            f"Markets: {r.active_markets}  Avg σ: {sigma_txt}",
+            f"Shock Test: {shock_txt}  Kelly Scale: {r.kelly_scale:.2f}",
+        ]
+        body = Text.from_markup("\n".join(lines))
+        return Panel(body, title="⚙ Risk Engine", border_style="magenta", box=box.ROUNDED)
 
     @staticmethod
     def _render_strategies(rows: List[StrategyRow]) -> Panel:

@@ -215,7 +215,7 @@ class TerminalConvergenceStrategy(BaseStrategy):
                 confidence = min(0.60 + btc_dist_pct * 0.10, 0.95)
 
             # Size the bet
-            bet_size = self._size_bet(estimated_prob, market_price)
+            bet_size = self._size_bet(estimated_prob, market_price, data.token_id)
             if bet_size <= 0:
                 continue
 
@@ -422,18 +422,21 @@ class TerminalConvergenceStrategy(BaseStrategy):
 
         return round(prob, 4)
 
-    def _size_bet(self, estimated_prob: float, market_prob: float) -> float:
-        """Size using Kelly with fallback to fixed."""
+    def _size_bet(self, estimated_prob: float, market_prob: float, token_id: str = "") -> float:
+        """Size using inventory-aware Kelly with fallback to fixed."""
         try:
             from ..sizing.kelly import kelly_size
             from ..config import PAPER_BALANCE_USD, PAPER_TRADING
 
             bankroll = PAPER_BALANCE_USD if PAPER_TRADING else 1000.0
+            pos_usd = self.positions.get(token_id, 0.0)
+            inv_q = pos_usd / market_prob if market_prob > 0 else 0.0
             result = kelly_size(
                 estimated_prob=estimated_prob,
                 market_price=market_prob,
                 bankroll=bankroll,
-                max_bet_usd=self.order_size_usd * 2,  # conservative for terminal
+                max_bet_usd=self.order_size_usd * 2,
+                inventory_q=inv_q,
             )
             if result.bet_size_usd > 0:
                 return result.bet_size_usd

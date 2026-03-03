@@ -188,6 +188,23 @@ KELLY_MAX_BET_FRACTION = float(os.getenv("KELLY_MAX_BET_FRACTION", "0.05"))
 KELLY_MIN_EDGE = float(os.getenv("KELLY_MIN_EDGE", "0.01"))
 
 # =============================================================================
+# bs-p NATIVE ENGINE (Avellaneda-Stoikov quoting + analytics)
+# =============================================================================
+# Master kill-switch: set to false to force pure-Python fallback
+NATIVE_ENGINE_ENABLED = os.getenv("NATIVE_ENGINE_ENABLED", "true").lower() == "true"
+# Path to libpmkernel.dylib / .so (auto-discovered if unset)
+PMKERNEL_LIB_PATH = os.getenv("PMKERNEL_LIB_PATH", "")
+# Risk aversion — higher = wider spreads, safer.  Start high for small bankrolls.
+QUOTING_GAMMA = float(os.getenv("QUOTING_GAMMA", "1.0"))
+# Liquidity / order-arrival parameter.  Higher = tighter spreads.
+QUOTING_K = float(os.getenv("QUOTING_K", "2.0"))
+# Default tau when market end_date is unknown (fraction of a day)
+QUOTING_TAU_DEFAULT = float(os.getenv("QUOTING_TAU_DEFAULT", "0.05"))
+# Greeks alert thresholds
+GREEKS_DELTA_ALERT = float(os.getenv("GREEKS_DELTA_ALERT", "0.3"))
+GREEKS_GAMMA_ALERT = float(os.getenv("GREEKS_GAMMA_ALERT", "0.2"))
+
+# =============================================================================
 # VOLATILITY / MARKET MAKING REGIME
 # =============================================================================
 # Rolling window for volatility calculation (seconds)
