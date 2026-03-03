@@ -93,8 +93,9 @@ class BinanceFeed:
         self._ws: Optional[websocket.WebSocketApp] = None
         self._thread: Optional[threading.Thread] = None
         self._running = False
-        self._reconnect_delay = 1.0
-        self._max_reconnect_delay = 30.0
+        self._reconnect_delay = 5.0
+        self._max_reconnect_delay = 60.0
+        self._min_reconnect_interval = 10.0  # never reconnect faster than this
 
     # ------------------------------------------------------------------
     # Public API
@@ -170,7 +171,7 @@ class BinanceFeed:
 
     def _on_open(self, ws) -> None:
         self._state.connected = True
-        self._reconnect_delay = 1.0
+        self._reconnect_delay = 5.0
         cprint(f"🔗 Binance WS connected: {self.symbol.upper()}", "green")
 
     def _on_close(self, ws, close_status_code, close_msg) -> None:
@@ -194,18 +195,25 @@ class BinanceFeed:
                     on_close=self._on_close,
                     on_error=self._on_error,
                 )
-                self._ws.run_forever(ping_interval=20, ping_timeout=10)
+                # Trade stream is high-frequency; skip ping/pong to avoid timeout recursion
+                self._ws.run_forever(
+                    ping_interval=0,
+                    skip_utf8_validation=True,
+                )
             except Exception as exc:
                 cprint(f"❌ Binance WS exception: {exc}", "red")
 
             if not self._running:
                 break
 
+            sleep_time = max(
+                self._reconnect_delay, self._min_reconnect_interval
+            )
             cprint(
-                f"♻️  Binance reconnecting in {self._reconnect_delay:.0f}s...",
+                f"♻️  Binance reconnecting in {sleep_time:.0f}s...",
                 "yellow",
             )
-            time.sleep(self._reconnect_delay)
+            time.sleep(sleep_time)
             self._reconnect_delay = min(
                 self._reconnect_delay * 2, self._max_reconnect_delay
             )

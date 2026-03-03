@@ -56,8 +56,8 @@ ENABLE_STRATEGY_ANALYTICS=true
 # =============================================================================
 # STRATEGIES (Plan B trio only)
 # =============================================================================
-DISABLED_STRATEGIES=spread,arbitrage,favorite_longshot,cross_platform_arbitrage,cross_asset,orderbook_imbalance,stink_bid,late_money,vpin,sentiment
-ENABLE_BTC_5MIN=true
+DISABLED_STRATEGIES=spread,arbitrage,favorite_longshot,cross_platform_arbitrage,cross_asset,orderbook_imbalance,stink_bid,late_money,vpin,sentiment,terminal_convergence
+ENABLE_BTC_5MIN=false
 
 # =============================================================================
 # MARKET FILTERS
@@ -84,7 +84,7 @@ COMBO_COOLDOWN=300
 # =============================================================================
 # WALLET COPY
 # =============================================================================
-TRACKED_WALLETS=0x1979ae6b7e6534de9c4539d0c205e582ca637c9d,0x1d0034134e339a309700ff2d34e99fa2d48b0313
+TRACKED_WALLETS=0x1979ae6b7e6534de9c4539d0c205e582ca637c9d,0x1d0034134e339a309700ff2d34e99fa2d48b0313,0x1461cc6e1a05e20710c416307db62c28f1d122d8
 WALLET_COPY_USE_LEADERBOARD=false
 WALLET_COPY_LEADERBOARD_TOP_N=1
 WALLET_COPY_LEADERBOARD_CATEGORY=CRYPTO
