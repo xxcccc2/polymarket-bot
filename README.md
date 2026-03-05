@@ -1,5 +1,16 @@
 # Polymarket Trading Bot
 
+[![Alpha](https://img.shields.io/badge/phase-alpha-orange)](https://github.com)
+[![Python](https://img.shields.io/badge/Python-3.12-3776ab?logo=python&logoColor=white)](https://python.org)
+[![Polymarket](https://img.shields.io/badge/Polymarket-CLOB-6366f1)](https://polymarket.com)
+[![Binance](https://img.shields.io/badge/Binance-WebSocket-f0b90b?logo=binance)](https://binance.com)
+[![bs-p](https://img.shields.io/badge/bs--p-Native-8b5cf6)](https://github.com)
+[![SQLite](https://img.shields.io/badge/SQLite-3-003b57?logo=sqlite&logoColor=white)](https://sqlite.org)
+[![Rich](https://img.shields.io/badge/Rich-TUI-10b981)](https://github.com/Textualize/rich)
+[![Telegram](https://img.shields.io/badge/Telegram-Bot-26a5e4?logo=telegram&logoColor=white)](https://telegram.org)
+
+---
+
 An institutional-grade algorithmic trading platform for Polymarket prediction markets, powered by the **bs-p native math engine** for theoretically optimal quoting and sizing.
 
 ## Features
