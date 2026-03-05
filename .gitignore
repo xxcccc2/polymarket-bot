@@ -69,3 +69,5 @@ data/*.sqlite-trace
 data/*.sqlite-trace-lock
 data/*.sqlite-trace-shm
 data/*.sqlite-trace-wal
+
+*.db
