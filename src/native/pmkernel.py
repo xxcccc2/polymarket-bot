@@ -32,7 +32,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
 def _find_library() -> Optional[ctypes.CDLL]:
-    """Search env var -> lib/ subdir -> sibling bs-p repo -> None."""
+    """Search env var -> lib/ subdir -> None."""
     candidates = []
 
     env_path = os.getenv("PMKERNEL_LIB_PATH")
@@ -40,7 +40,6 @@ def _find_library() -> Optional[ctypes.CDLL]:
         candidates.append(env_path)
 
     candidates.append(str(_PROJECT_ROOT / "lib" / _LIB_NAME))
-    candidates.append(str(_PROJECT_ROOT.parent / "bs-p" / _LIB_NAME))
 
     for path in candidates:
         if os.path.isfile(path):
