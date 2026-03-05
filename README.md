@@ -174,7 +174,7 @@ Related controls:
 
 ## Strategies
 
-### Active Strategies (Recommended for small bankrolls)
+### Active Strategies
 
 #### 1. Cross-Asset Latency Arbitrage ✅ `cross_asset`
 **Primary edge.** Binance BTC price moves hit Polymarket 5-min markets with multi-second lag:
