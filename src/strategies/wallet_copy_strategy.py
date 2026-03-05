@@ -18,10 +18,13 @@ import time
 from .base_strategy import BaseStrategy, Signal, SignalType, MarketData
 from ..logging_utils import cprint
 from ..data_client import get_trades_by_user, get_leaderboard
+from ..wallet_rotation import RotationManager
 from ..config import (
     ORDER_SIZE_USD,
+    POLYMARKET_MIN_ORDER_SIZE,
     PROXY_ADDRESS,
     TRACKED_WALLETS,
+    WALLET_COPY_BLOCKED_WALLETS,
     WALLET_COPY_USE_LEADERBOARD,
     WALLET_COPY_LEADERBOARD_TOP_N,
     WALLET_COPY_LEADERBOARD_CATEGORY,
@@ -33,6 +36,18 @@ from ..config import (
     WALLET_COPY_CRYPTO_ONLY,
     WALLET_COPY_COOLDOWN_SECONDS,
     WALLET_COPY_MIN_WALLET_POLL_SECONDS,
+    WALLET_ROTATION_ENABLED,
+    WALLET_ROTATION_REFRESH_INTERVAL_SECONDS,
+    WALLET_ROTATION_INACTIVITY_THRESHOLD_HOURS,
+    WALLET_ROTATION_MAX_REPLACEMENTS_PER_CYCLE,
+    WALLET_ROTATION_MIN_TRACKED_WALLETS,
+    WALLET_ROTATION_CANDIDATE_POOL_SIZE,
+    WALLET_ROTATION_MIN_TRADES,
+    WALLET_ROTATION_MIN_CRYPTO_PCT,
+    WALLET_ROTATION_MIN_SHORTTERM_PCT,
+    WALLET_ROTATION_MAX_DAYS_SINCE_LAST_TRADE,
+    WALLET_ROTATION_MIN_TRADES_PER_DAY,
+    WALLET_ROTATION_REMOVED_COOLDOWN_HOURS,
 )
 
 
@@ -60,11 +75,30 @@ class WalletCopyStrategy(BaseStrategy):
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         super().__init__(config)
         
-        # Tracked wallets (proxy addresses)
+        # Blocked wallets (hedge/MM) — never track or copy
+        self._blocked = {a.lower() for a in self.config.get("blocked_wallets", WALLET_COPY_BLOCKED_WALLETS)}
+        if self._blocked:
+            cprint(f"   [WALLET_COPY] Blocked {len(self._blocked)} wallets (hedge/MM): {', '.join(sorted(self._blocked)[:3])}{'...' if len(self._blocked) > 3 else ''}", "yellow")
+
+        # Tracked wallets: load from DB if persisted, else from config
         manual = self.config.get("tracked_wallets", TRACKED_WALLETS)
         if isinstance(manual, str):
             manual = [a.strip() for a in manual.split(",") if a.strip()]
-        self.tracked_wallets: List[str] = list(manual)
+        config_wallets = [w for w in manual if w.lower() not in self._blocked]
+        store = self.config.get("store")
+        persisted_removed_at: Dict[str, float] = {}
+        if store and hasattr(store, "load_wallet_copy_state"):
+            loaded = store.load_wallet_copy_state()
+            if loaded:
+                persisted_wallets, persisted_removed_at = loaded
+                if persisted_wallets:
+                    self.tracked_wallets = [w for w in persisted_wallets if w.lower() not in self._blocked]
+                else:
+                    self.tracked_wallets = list(config_wallets)
+            else:
+                self.tracked_wallets = list(config_wallets)
+        else:
+            self.tracked_wallets = list(config_wallets)
         
         # Leaderboard discovery
         self.use_leaderboard = self.config.get("use_leaderboard", WALLET_COPY_USE_LEADERBOARD)
@@ -100,18 +134,93 @@ class WalletCopyStrategy(BaseStrategy):
         self.copies_executed = 0
         self.sells_mirrored = 0
         self.trades_skipped = 0
+        self.signals_per_wallet: Dict[str, int] = defaultdict(int)  # wallet -> signal count for TUI
         self.last_leaderboard_refresh = 0.0
         self.leaderboard_refresh_interval = 300  # 5 min
+
+        # Rotation (inactivity-driven replacement)
+        self.rotation_enabled = self.config.get("rotation_enabled", WALLET_ROTATION_ENABLED)
+        self._rotation_manager: Optional[RotationManager] = None
+        self._last_rotation_result: Optional[dict] = None
+        if self.rotation_enabled:
+            self._rotation_manager = RotationManager(
+                blocked_wallets=list(self._blocked),
+                inactivity_threshold_hours=self.config.get(
+                    "rotation_inactivity_threshold_hours",
+                    WALLET_ROTATION_INACTIVITY_THRESHOLD_HOURS,
+                ),
+                refresh_interval_seconds=self.config.get(
+                    "rotation_refresh_interval_seconds",
+                    WALLET_ROTATION_REFRESH_INTERVAL_SECONDS,
+                ),
+                max_replacements_per_cycle=self.config.get(
+                    "rotation_max_replacements_per_cycle",
+                    WALLET_ROTATION_MAX_REPLACEMENTS_PER_CYCLE,
+                ),
+                min_tracked_wallets=self.config.get(
+                    "rotation_min_tracked_wallets",
+                    WALLET_ROTATION_MIN_TRACKED_WALLETS,
+                ),
+                candidate_pool_size=self.config.get(
+                    "rotation_candidate_pool_size",
+                    WALLET_ROTATION_CANDIDATE_POOL_SIZE,
+                ),
+                min_trades=self.config.get("rotation_min_trades", WALLET_ROTATION_MIN_TRADES),
+                min_crypto_pct=self.config.get("rotation_min_crypto_pct", WALLET_ROTATION_MIN_CRYPTO_PCT),
+                min_shortterm_pct=self.config.get("rotation_min_shortterm_pct", WALLET_ROTATION_MIN_SHORTTERM_PCT),
+                max_days_since_last_trade=self.config.get(
+                    "rotation_max_days_since_last_trade",
+                    WALLET_ROTATION_MAX_DAYS_SINCE_LAST_TRADE,
+                ),
+                min_trades_per_day=self.config.get(
+                    "rotation_min_trades_per_day",
+                    WALLET_ROTATION_MIN_TRADES_PER_DAY,
+                ),
+                leaderboard_category=self.config.get(
+                    "leaderboard_category",
+                    WALLET_COPY_LEADERBOARD_CATEGORY,
+                ),
+                removed_cooldown_hours=self.config.get(
+                    "rotation_removed_cooldown_hours",
+                    WALLET_ROTATION_REMOVED_COOLDOWN_HOURS,
+                ),
+                initial_removed_at=persisted_removed_at,
+            )
     
     def _refresh_tracked_wallets(self) -> None:
-        """Optionally refresh wallet list from leaderboard."""
+        """Refresh wallet list: rotation (inactivity-driven) or leaderboard merge."""
+        if self.rotation_enabled and self._rotation_manager:
+            try:
+                new_tracked, result = self._rotation_manager.run_rotation(
+                    self.tracked_wallets,
+                    on_log=lambda msg: cprint(f"   {msg}", "cyan"),
+                )
+                if result.replaced or result.added:
+                    self.tracked_wallets = [w for w in new_tracked if w.lower() not in self._blocked]
+                    self._last_rotation_result = {
+                        "replaced": result.replaced,
+                        "added": result.added,
+                        "reason": result.reason,
+                        "score_breakdown": result.score_breakdown,
+                    }
+                    self._persist_wallet_copy_state()
+                    cprint(
+                        f"   [WALLET_COPY] Rotation: -{len(result.replaced)} +{len(result.added)} "
+                        f"| now tracking {len(self.tracked_wallets)} wallets",
+                        "cyan",
+                        attrs=["bold"],
+                    )
+            except Exception as e:
+                cprint(f"   [WALLET_COPY] Rotation failed: {e}", "yellow")
+            return
+
         if not self.use_leaderboard:
             return
-        
+
         now = time.time()
         if now - self.last_leaderboard_refresh < self.leaderboard_refresh_interval:
             return
-        
+
         try:
             entries = get_leaderboard(
                 category=self.leaderboard_category,
@@ -125,11 +234,28 @@ class WalletCopyStrategy(BaseStrategy):
                 if w and w not in wallets:
                     wallets.append(w)
             if wallets:
-                self.tracked_wallets = list(dict.fromkeys(self.tracked_wallets + wallets))
+                allowed = [w for w in wallets if w.lower() not in self._blocked]
+                self.tracked_wallets = [w for w in list(dict.fromkeys(self.tracked_wallets + allowed)) if w.lower() not in self._blocked]
                 self.last_leaderboard_refresh = now
+                self._persist_wallet_copy_state()
                 cprint(f"   [WALLET_COPY] Leaderboard: tracking {len(self.tracked_wallets)} wallets", "cyan")
         except Exception as e:
             cprint(f"   [WALLET_COPY] Leaderboard fetch failed: {e}", "yellow")
+
+    def _persist_wallet_copy_state(self) -> None:
+        """Save tracked wallets and rotation cooldown to DB."""
+        store = self.config.get("store")
+        if not store or not hasattr(store, "save_wallet_copy_state"):
+            return
+        removed_at = (
+            self._rotation_manager.get_removed_at()
+            if self._rotation_manager
+            else {}
+        )
+        try:
+            store.save_wallet_copy_state(self.tracked_wallets, removed_at)
+        except Exception as e:
+            cprint(f"   [WALLET_COPY] Persist failed: {e}", "yellow")
     
     def _trade_id(self, t: Dict) -> str:
         """Unique ID for a trade (for deduplication)."""
@@ -303,6 +429,8 @@ class WalletCopyStrategy(BaseStrategy):
                         if not copied_wallets:
                             self.copied_from.pop(token_id, None)
                         continue
+                    if pos.size < POLYMARKET_MIN_ORDER_SIZE:
+                        continue  # Skip mirror SELL: position too small for Polymarket minimum
                     if not self._is_new_trade(wallet, trade):
                         continue
                     price = float(trade.get("price", 0))
@@ -323,12 +451,15 @@ class WalletCopyStrategy(BaseStrategy):
                             "strategy": "wallet_copy",
                             "trader_wallet": wallet,
                             "trader_name": trader,
+                            "entry_price": getattr(pos, "avg_price", None),
                         },
                     )
                     signals.append(sell_signal)
                     self.signals_generated += 1
+                    self.signals_per_wallet[wallet] += 1
+                    wallet_short = f"{wallet[:8]}...{wallet[-6:]}" if len(wallet) >= 18 else wallet
                     cprint(
-                        f"📋 WALLET_COPY: {trader} → SELL (mirror) {pos.size:.1f} @ {price*100:.1f}¢ | {market_slug[:35]}...",
+                        f"📋 WALLET_COPY: {wallet_short} → SELL (mirror) {pos.size:.1f} @ {price*100:.1f}¢ | {market_slug[:35]}...",
                         "magenta",
                         attrs=["bold"],
                     )
@@ -384,6 +515,7 @@ class WalletCopyStrategy(BaseStrategy):
                     size_usd = max(1, min(size_usd, self.copy_size_usd * 3))  # Cap
                 
                 size_shares = size_usd / price if price > 0 else 0
+                size_shares = max(POLYMARKET_MIN_ORDER_SIZE, size_shares)
                 if size_shares < 0.1:
                     continue
                 
@@ -413,9 +545,11 @@ class WalletCopyStrategy(BaseStrategy):
                 )
                 signals.append(signal)
                 self.signals_generated += 1
-                
+                self.signals_per_wallet[wallet] += 1
+
+                wallet_short = f"{wallet[:8]}...{wallet[-6:]}" if len(wallet) >= 18 else wallet
                 cprint(
-                    f"📋 WALLET_COPY: {trader} → BUY {size_shares:.1f} @ {price*100:.1f}¢ | {market_slug[:35]}...",
+                    f"📋 WALLET_COPY: {wallet_short} → BUY {size_shares:.1f} @ {price*100:.1f}¢ | {market_slug[:35]}...",
                     "magenta",
                     attrs=["bold"],
                 )
@@ -454,6 +588,7 @@ class WalletCopyStrategy(BaseStrategy):
                             "strategy": "wallet_copy",
                             "trader": signal.metadata.get("trader_name", "unknown"),
                             "trader_wallet": signal.metadata.get("trader_wallet"),
+                            "entry_price": signal.metadata.get("entry_price"),
                         },
                     )
                 else:
@@ -474,4 +609,27 @@ class WalletCopyStrategy(BaseStrategy):
             "trades_skipped": self.trades_skipped,
             "positions_tracked": len(self.copied_from),
         })
+        if self._last_rotation_result:
+            state["last_rotation"] = self._last_rotation_result
+
+        # TUI status: signals per wallet + rotation blurb when applicable
+        status_parts = []
+        _max_wallets_tui = 12  # Room for >5 wallets in TUI Status column
+        if self.signals_per_wallet:
+            # Show per-wallet signal counts: "8E9cD5: 5 | abc123: 7"
+            parts = []
+            for w in self.tracked_wallets[:_max_wallets_tui]:
+                cnt = self.signals_per_wallet.get(w, 0)
+                short = f"{w[2:8]}" if w.startswith("0x") and len(w) >= 10 else w[:6]
+                parts.append(f"{short}: {cnt}")
+            status_parts.append(" | ".join(parts))
+        elif self.tracked_wallets:
+            short = [f"{w[:6]}...{w[-4:]}" for w in self.tracked_wallets[:_max_wallets_tui]]
+            status_parts.append(f"{len(self.tracked_wallets)}: {' '.join(short)}")
+        else:
+            status_parts.append("no wallets")
+        if self._last_rotation_result and (self._last_rotation_result.get("replaced") or self._last_rotation_result.get("added")):
+            r, a = len(self._last_rotation_result.get("replaced", [])), len(self._last_rotation_result.get("added", []))
+            status_parts.append(f"| rot -{r}+{a}")
+        state["status"] = " ".join(status_parts)
         return state

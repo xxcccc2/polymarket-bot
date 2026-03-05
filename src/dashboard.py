@@ -268,10 +268,10 @@ class Dashboard:
             show_edge=False,
             padding=(0, 1),
         )
-        table.add_column("Strategy", style="bold", ratio=3)
+        table.add_column("Strategy", style="bold", ratio=2)
         table.add_column("Sig", justify="right", ratio=1)
         table.add_column("Trades", justify="right", ratio=1)
-        table.add_column("Status", justify="left", ratio=2)
+        table.add_column("Status", justify="left", ratio=4)  # Room for 12+ wallet addresses
 
         for r in rows:
             table.add_row(

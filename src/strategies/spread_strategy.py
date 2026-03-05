@@ -32,10 +32,12 @@ from ..config import (
     MAX_POSITION_USD,
     MIN_PRICE_CENTS,
     MAX_PRICE_CENTS,
-    TRADING_FEE_RATE,
+    MAKER_FEE_RATE,
     MIN_PROFIT_MARGIN,
     CRYPTO_MARKET_KEYWORDS,
-    ONLY_CRYPTO_MARKETS,
+    SPREAD_ONLY_CRYPTO_MARKETS,
+    SPREAD_ONLY_SHORTTERM_CRYPTO,
+    SPREAD_LOG_VERBOSE,
     VOL_HIGH_THRESHOLD,
     VOL_LOW_THRESHOLD,
     VOL_HIGH_SPREAD_MULT,
@@ -43,6 +45,7 @@ from ..config import (
     QUOTING_GAMMA,
     QUOTING_K,
     QUOTING_TAU_DEFAULT,
+    BTC_5MIN_KEYWORDS,
 )
 
 
@@ -71,7 +74,8 @@ class SpreadStrategy(BaseStrategy):
         self.order_size_usd = self.config.get("order_size_usd", ORDER_SIZE_USD)
         self.max_position_usd = self.config.get("max_position_usd", MAX_POSITION_USD)
         self.price_improvement = self.config.get("price_improvement", 0)
-        self.only_crypto = self.config.get("only_crypto", ONLY_CRYPTO_MARKETS)
+        self.only_crypto = self.config.get("only_crypto", SPREAD_ONLY_CRYPTO_MARKETS)
+        self.only_shortterm_crypto = self.config.get("only_shortterm_crypto", SPREAD_ONLY_SHORTTERM_CRYPTO)
 
         self.binance_feed = self.config.get("binance_feed")
         self.risk_manager = self.config.get("risk_manager")
@@ -87,6 +91,9 @@ class SpreadStrategy(BaseStrategy):
         # Throttle repeated order-failure logs (once per 15s per error type)
         self._order_fail_log_ts: Dict[str, float] = {}
         self._order_fail_throttle_sec = 15
+        # Throttle "filtered: cooldown" to one summary line per 30s
+        self._cooldown_log_ts: float = 0.0
+        self._cooldown_log_interval_sec: float = 30.0
 
         # Per-market implied vol cache {token_id: sigma_b}
         self._sigma_cache: Dict[str, float] = {}
@@ -110,9 +117,26 @@ class SpreadStrategy(BaseStrategy):
         # Check if crypto market (if filter enabled)
         if self.only_crypto:
             question_lower = market_data.question.lower()
-            is_crypto = any(kw in question_lower for kw in CRYPTO_MARKET_KEYWORDS)
+            slug_lower = market_data.market_slug.lower()
+            text = f"{question_lower} {slug_lower}"
+            shortterm_duration_markers = [
+                "5m", "15m", "1h", "4h",
+                "5 min", "5-min", "5min", "5-minute", "5 minute",
+                "15 min", "15-min", "15min",
+                "1 hour", "4 hour", "4-hour",
+                "updown-5m", "updown-15m", "updown-1h", "updown-4h",
+                "up or down - 5 min", "up or down - 15 min",
+                "up or down - 1 hour", "up or down - 1h",
+                "up or down - 4 hour", "up or down - 4h",
+            ]
+            is_crypto = any(kw in text for kw in CRYPTO_MARKET_KEYWORDS)
             if not is_crypto:
                 return False
+            # When only_shortterm_crypto: exclude MegaETH, airdrop, etc. — only 5m/15m/1h/4h up/down
+            if self.only_shortterm_crypto:
+                is_shortterm = any(kw in text for kw in shortterm_duration_markers)
+                if not is_shortterm:
+                    return False
         
         # Check price is in safe range
         mid_cents = market_data.mid_price * 100
@@ -245,8 +269,9 @@ class SpreadStrategy(BaseStrategy):
         """
         self._update_vol_regime()
         signals = []
+        verbose = self.config.get("log_verbose", SPREAD_LOG_VERBOSE)
 
-        if market_data:
+        if market_data and verbose:
             best = max(market_data, key=lambda x: x.spread_cents)
             cprint(
                 f"      Best spread: {best.spread_cents:.2f}¢ @ {best.question[:35]}... "
@@ -254,6 +279,7 @@ class SpreadStrategy(BaseStrategy):
                 "white",
             )
 
+        cooldown_filtered = 0
         for data in market_data:
             if not self.should_trade_market(data):
                 mid_cents = data.mid_price * 100
@@ -265,11 +291,15 @@ class SpreadStrategy(BaseStrategy):
                 elif data.spread_cents < self.min_spread_cents:
                     pass
                 else:
-                    cprint(f"      {data.question[:35]}... filtered: cooldown active", "yellow")
+                    cooldown_filtered += 1
                 continue
 
             current_position = self.positions.get(data.token_id, 0)
             if current_position >= self.max_position_usd:
+                continue
+
+            # Skip if we already have an active BUY for this token (order manager allows only 1 per token)
+            if any(o.get("token_id") == data.token_id for o in self.pending_orders.values()):
                 continue
 
             pending_value = sum(
@@ -283,17 +313,19 @@ class SpreadStrategy(BaseStrategy):
             entry_price, exit_price, native_used = self._compute_quotes(data)
 
             gross_profit_pct = (exit_price - entry_price) / entry_price if entry_price > 0 else 0
-            net_profit_pct = gross_profit_pct - (2 * TRADING_FEE_RATE)
+            # Makers pay zero fees on Polymarket (2026+). MAKER_FEE_RATE=0 by default.
+            net_profit_pct = gross_profit_pct - (2 * MAKER_FEE_RATE)
 
             if net_profit_pct < MIN_PROFIT_MARGIN:
                 continue
 
             engine_tag = "AS" if native_used else "manual"
-            cprint(
-                f"      [{engine_tag}] {data.question[:35]}... spread={data.spread_cents:.1f}¢, "
-                f"profit={net_profit_pct*100:.1f}%, bid={entry_price:.3f}, ask={exit_price:.3f}",
-                "green",
-            )
+            if verbose:
+                cprint(
+                    f"      [{engine_tag}] {data.question[:35]}... spread={data.spread_cents:.1f}¢, "
+                    f"profit={net_profit_pct*100:.1f}%, bid={entry_price:.3f}, ask={exit_price:.3f}",
+                    "green",
+                )
 
             remaining_capacity = self.max_position_usd - current_position
             size_usd = min(self.order_size_usd, remaining_capacity)
@@ -327,7 +359,39 @@ class SpreadStrategy(BaseStrategy):
 
             signals.append(buy_signal)
             self.signals_generated += 1
-            cprint(f"  {buy_signal}", "cyan")
+            if verbose:
+                cprint(f"  {buy_signal}", "cyan")
+
+        # Throttled single-line summary for cooldown-filtered (max once per 30s)
+        if cooldown_filtered > 0:
+            now_ts = _time.time()
+            if now_ts - self._cooldown_log_ts >= self._cooldown_log_interval_sec:
+                self._cooldown_log_ts = now_ts
+                cprint(f"      Spread: {cooldown_filtered} market(s) skipped (cooldown)", "yellow")
+
+        # Summary mode: one line per scan when we have signals
+        if not verbose and signals:
+            markets = set(s.market_slug for s in signals)
+            by_dur = {}
+            for s in signals:
+                slug = s.market_slug.lower()
+                if "5m" in slug or "5-min" in slug:
+                    by_dur["5m"] = by_dur.get("5m", 0) + 1
+                elif "15m" in slug or "15-min" in slug:
+                    by_dur["15m"] = by_dur.get("15m", 0) + 1
+                elif "1h" in slug or "1-hour" in slug:
+                    by_dur["1h"] = by_dur.get("1h", 0) + 1
+                elif "4h" in slug or "4-hour" in slug:
+                    by_dur["4h"] = by_dur.get("4h", 0) + 1
+                else:
+                    by_dur["other"] = by_dur.get("other", 0) + 1
+            dur_parts = [f"{k}:{v}" for k, v in sorted(by_dur.items())]
+            avg_profit = sum(s.metadata.get("net_profit_pct", 0) for s in signals) / len(signals) * 100
+            cprint(
+                f"Spread: {len(signals)} signals ({len(markets)} markets) | "
+                f"{', '.join(dur_parts)} | avg profit {avg_profit:.1f}%",
+                "green",
+            )
 
         return signals
     

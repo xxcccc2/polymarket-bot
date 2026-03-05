@@ -27,6 +27,8 @@ load_dotenv(dotenv_path=PROJECT_ROOT / '.env', override=False)
 # POLYMARKET API SETTINGS
 # =============================================================================
 CLOB_HOST = "https://clob.polymarket.com"
+# Minimum order size in shares (Polymarket rejects below this)
+POLYMARKET_MIN_ORDER_SIZE = float(os.getenv("POLYMARKET_MIN_ORDER_SIZE", "5"))
 GAMMA_HOST = "https://gamma-api.polymarket.com"
 WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 CHAIN_ID = 137  # Polygon mainnet
@@ -48,13 +50,28 @@ KALSHI_MARKET_MAP_PATH = os.getenv(
 KALSHI_MIN_PROFIT_CENTS = float(os.getenv("KALSHI_MIN_PROFIT_CENTS", "2"))
 
 # =============================================================================
+# POLYBACKTEST API (for backtesting)
+# =============================================================================
+POLYBACKTEST_API_KEY = os.getenv("POLYBACKTEST_API_KEY", "")
+POLYBACKTEST_BASE_URL = os.getenv("POLYBACKTEST_BASE_URL", "https://api.polybacktest.com")
+
+# =============================================================================
 # BINANCE API SETTINGS
 # =============================================================================
 BINANCE_API_KEY = os.getenv("BINANCE_API_KEY", "")
 BINANCE_SECRET_KEY = os.getenv("BINANCE_SECRET_KEY", "")
 BINANCE_WS_URL = os.getenv("BINANCE_WS_URL", "wss://stream.binance.com:9443/ws")
+BINANCE_WS_COMBINED_URL = os.getenv(
+    "BINANCE_WS_COMBINED_URL", "wss://stream.binance.com:9443/stream"
+)
 BINANCE_REST_URL = os.getenv("BINANCE_REST_URL", "https://api.binance.com")
 BINANCE_SYMBOL = os.getenv("BINANCE_SYMBOL", "btcusdt")
+# Comma-separated symbols for multi-asset feed (BTC, ETH, SOL, XRP). Single symbol = legacy mode.
+BINANCE_SYMBOLS = [
+    s.strip().lower()
+    for s in os.getenv("BINANCE_SYMBOLS", "btcusdt,ethusdt,solusdt,xrpusdt").split(",")
+    if s.strip()
+]
 
 # =============================================================================
 # CREDENTIALS (from .env)
@@ -127,6 +144,13 @@ MIN_VOLUME_USD = float(os.getenv("MIN_VOLUME_USD", "10000"))
 # Only trade crypto markets (set to false for political/sports/all markets)
 ONLY_CRYPTO_MARKETS = os.getenv("ONLY_CRYPTO_MARKETS", "false").lower() == "true"
 
+# Spread strategy: restrict to crypto only (false = trade all markets in universe)
+SPREAD_ONLY_CRYPTO_MARKETS = os.getenv("SPREAD_ONLY_CRYPTO_MARKETS", "false").lower() == "true"
+# When true: only trade crypto short-term (5m/15m/1h/4h up/down), exclude MegaETH/long-dated
+SPREAD_ONLY_SHORTTERM_CRYPTO = os.getenv("SPREAD_ONLY_SHORTTERM_CRYPTO", "false").lower() == "true"
+# Spread log: false = one summary line per scan (TUI-friendly); true = per-signal detail
+SPREAD_LOG_VERBOSE = os.getenv("SPREAD_LOG_VERBOSE", "false").lower() == "true"
+
 # Keywords to identify crypto price prediction markets
 CRYPTO_MARKET_KEYWORDS = [
     "bitcoin", "btc", "ethereum", "eth", "solana", "sol",
@@ -141,22 +165,28 @@ ENABLE_BTC_5MIN = os.getenv("ENABLE_BTC_5MIN", "true").lower() == "true"
 
 # Block orders on markets that resolve in more than this many hours (0 = disabled)
 MAX_HOURS_TO_EXPIRY = float(os.getenv("MAX_HOURS_TO_EXPIRY", "1"))
+# Keep only nearest short-term crypto cycle buckets (5m/15m/1h/4h per asset)
+SHORTTERM_NEAREST_CYCLE_ONLY = os.getenv("SHORTTERM_NEAREST_CYCLE_ONLY", "true").lower() == "true"
+# Cap for nearest short-term buckets in hours (0 = use MAX_HOURS_TO_EXPIRY)
+SHORTTERM_MAX_HOURS_AHEAD = float(os.getenv("SHORTTERM_MAX_HOURS_AHEAD", "0"))
 
-# Keywords to identify short-term BTC markets on Polymarket
+# Keywords to identify short-term crypto markets (5m, 15m, 1h, 4h)
 # Event slugs: btc-updown-5m-*, sol-updown-15m-*, ethereum-up-or-down-*
 # Market titles: "Bitcoin Up or Down - 5 min", "- 15 min", "- 1 hour"
 BTC_5MIN_KEYWORDS = [
     # Event slug patterns (from /events): btc-updown-5m, ethereum-up-or-down
-    "updown", "up-or-down", "5m", "15m", "1h",
+    "updown", "up-or-down", "5m", "15m", "1h", "4h",
     # Exact Polymarket phrasing (from market titles)
     "up or down - 5 min",
     "up or down - 15 min",
     "up or down - 1 hour",
     "up or down - 1h",
+    "up or down - 4 hour",
+    "up or down - 4h",
     # Fallback patterns
     "5 min", "5-min", "5min", "5-minute", "5 minute",
     "15 min", "15-min", "15min",
-    "1 hour",
+    "1 hour", "4 hour", "4h", "4-hour",
     "up or down",
 ]
 
@@ -173,6 +203,17 @@ BTC_MIN_CONFIDENCE = float(os.getenv("BTC_MIN_CONFIDENCE", "0.52"))
 TERMINAL_CONVERGENCE_WINDOW_SECONDS = int(os.getenv("TERMINAL_CONVERGENCE_WINDOW_SECONDS", "60"))
 # Minimum mispricing (cents) to trigger terminal convergence
 TERMINAL_MIN_EDGE_CENTS = float(os.getenv("TERMINAL_MIN_EDGE_CENTS", "3"))
+# Restrict to 1h Up/Down only (Binance = resolution source; 5m/15m/4h use Chainlink)
+TERMINAL_CONVERGENCE_1H_ONLY = os.getenv("TERMINAL_CONVERGENCE_1H_ONLY", "true").lower() == "true"
+
+# Keywords for 1h-only mode (Polymarket 1h Up/Down event slugs and titles)
+# e.g. "Bitcoin Up or Down - March 4, 1PM ET", "Hourly Crypto", "btc-updown-1h-..."
+TERMINAL_1H_KEYWORDS = [
+    "1h", "1 hour", "hourly",
+    "up or down - 1 hour", "up or down - 1h", "updown-1h",
+]
+# Keywords that indicate NOT 1h (5m/15m/4h) — exclude when matching "up or down"
+TERMINAL_NON_1H_KEYWORDS = ["5m", "15m", "4h", "5 min", "15 min", "4 hour", "updown-5m", "updown-15m", "updown-4h"]
 
 # Orderbook imbalance — minimum bid/ask volume ratio to signal
 ORDERBOOK_IMBALANCE_RATIO = float(os.getenv("ORDERBOOK_IMBALANCE_RATIO", "2.5"))
@@ -295,6 +336,47 @@ WALLET_COPY_CRYPTO_ONLY = os.getenv("WALLET_COPY_CRYPTO_ONLY", "true").lower() =
 WALLET_COPY_COOLDOWN_SECONDS = int(os.getenv("WALLET_COPY_COOLDOWN_SECONDS", "60"))
 WALLET_COPY_MIN_WALLET_POLL_SECONDS = float(os.getenv("WALLET_COPY_MIN_WALLET_POLL_SECONDS", "2.0"))
 
+# Blocked wallets: never track or copy (hedge/MM/volume-farmer)
+# Comma-separated env override + data/blocked_wallets.txt (one address per line)
+WALLET_COPY_BLOCKED_WALLETS_ENV = [
+    w.strip().lower()
+    for w in os.getenv("WALLET_COPY_BLOCKED_WALLETS", "").split(",")
+    if w.strip()
+]
+_BLOCKED_WALLETS_FILE = Path(PROJECT_ROOT) / "data" / "blocked_wallets.txt"
+
+
+def _load_blocked_wallets() -> list[str]:
+    """Merge env + file into normalized (lowercase) blocked list."""
+    out = set(WALLET_COPY_BLOCKED_WALLETS_ENV)
+    if _BLOCKED_WALLETS_FILE.exists():
+        try:
+            with open(_BLOCKED_WALLETS_FILE) as f:
+                for line in f:
+                    line = line.split("#")[0].strip()
+                    if line and line.startswith("0x"):
+                        out.add(line.lower())
+        except OSError:
+            pass
+    return list(out)
+
+
+WALLET_COPY_BLOCKED_WALLETS = _load_blocked_wallets()
+
+# Wallet rotation (auto-replace inactive tracked wallets)
+WALLET_ROTATION_ENABLED = os.getenv("WALLET_ROTATION_ENABLED", "false").lower() == "true"
+WALLET_ROTATION_REFRESH_INTERVAL_SECONDS = float(os.getenv("WALLET_ROTATION_REFRESH_INTERVAL_SECONDS", "600"))
+WALLET_ROTATION_INACTIVITY_THRESHOLD_HOURS = float(os.getenv("WALLET_ROTATION_INACTIVITY_THRESHOLD_HOURS", "48"))
+WALLET_ROTATION_MAX_REPLACEMENTS_PER_CYCLE = int(os.getenv("WALLET_ROTATION_MAX_REPLACEMENTS_PER_CYCLE", "2"))
+WALLET_ROTATION_MIN_TRACKED_WALLETS = int(os.getenv("WALLET_ROTATION_MIN_TRACKED_WALLETS", "1"))
+WALLET_ROTATION_CANDIDATE_POOL_SIZE = int(os.getenv("WALLET_ROTATION_CANDIDATE_POOL_SIZE", "30"))
+WALLET_ROTATION_MIN_TRADES = int(os.getenv("WALLET_ROTATION_MIN_TRADES", "20"))
+WALLET_ROTATION_MIN_CRYPTO_PCT = float(os.getenv("WALLET_ROTATION_MIN_CRYPTO_PCT", "70"))
+WALLET_ROTATION_MIN_SHORTTERM_PCT = float(os.getenv("WALLET_ROTATION_MIN_SHORTTERM_PCT", "40"))
+WALLET_ROTATION_MAX_DAYS_SINCE_LAST_TRADE = float(os.getenv("WALLET_ROTATION_MAX_DAYS_SINCE_LAST_TRADE", "7"))
+WALLET_ROTATION_MIN_TRADES_PER_DAY = float(os.getenv("WALLET_ROTATION_MIN_TRADES_PER_DAY", "0.5"))
+WALLET_ROTATION_REMOVED_COOLDOWN_HOURS = float(os.getenv("WALLET_ROTATION_REMOVED_COOLDOWN_HOURS", "24"))
+
 # =============================================================================
 # BOT BEHAVIOR
 # =============================================================================
@@ -313,8 +395,8 @@ PAPER_TRADING = os.getenv("PAPER_TRADING", "true").lower() == "true"
 # Paper trading balance (used when PAPER_TRADING=true)
 PAPER_BALANCE_USD = float(os.getenv("PAPER_BALANCE_USD", "1000"))
 
-# Enable WebSocket feed for orderbook updates
-ENABLE_WEBSOCKET_FEED = os.getenv("ENABLE_WEBSOCKET_FEED", "false").lower() == "true"
+# Enable WebSocket feed for orderbook updates (recommended: true for real-time data)
+ENABLE_WEBSOCKET_FEED = os.getenv("ENABLE_WEBSOCKET_FEED", "true").lower() == "true"
 
 # Log level
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
@@ -359,11 +441,14 @@ GENERAL_RATE_LIMIT = 100
 # =============================================================================
 # FEE STRUCTURE
 # =============================================================================
-# Polymarket trading fee (1% = 0.01)
-TRADING_FEE_RATE = 0.01
+# Polymarket trading fee for taker (1% = 0.01). Used by taker strategies.
+TRADING_FEE_RATE = float(os.getenv("TRADING_FEE_RATE", "0.01"))
+
+# Maker fee (round-trip): 0 = Polymarket makers pay zero fees (2026+). Used by spread strategy.
+MAKER_FEE_RATE = float(os.getenv("MAKER_FEE_RATE", "0"))
 
 # Minimum profit margin after fees to execute trade
-MIN_PROFIT_MARGIN = 0.005  # 0.5%
+MIN_PROFIT_MARGIN = float(os.getenv("MIN_PROFIT_MARGIN", "0.005"))  # 0.5%
 
 # =============================================================================
 # DATA PATHS
@@ -376,6 +461,10 @@ _default_db_name = (
     f"bot_state_{BOT_WALLET_ID.lower()}.sqlite" if BOT_WALLET_ID else "bot_state.sqlite"
 )
 BOT_STATE_DB = Path(os.getenv("BOT_STATE_DB", str(DATA_DIR / _default_db_name)))
+
+# Backtest data directory and DB
+BACKTEST_DIR = DATA_DIR / "backtest"
+BACKTEST_DB = Path(os.getenv("BACKTEST_DB", str(BACKTEST_DIR / "polybacktest.db")))
 
 # Create directories if they don't exist
 DATA_DIR.mkdir(exist_ok=True)

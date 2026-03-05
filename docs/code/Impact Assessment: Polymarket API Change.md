@@ -1,4 +1,18 @@
 Impact Assessment: Polymarket API Changes vs. Your Bot
+
+## Implementation Status (updated)
+
+| Item | Status | Notes |
+|------|--------|-------|
+| feeRateBps in order signing | ✅ Covered | py-clob-client (upgraded) fetches fee via `get_fee_rate_bps()` and includes it in signed orders automatically |
+| WebSocket feed | ✅ Done | Default flipped to `true`; you have `ENABLE_WEBSOCKET_FEED=true` in settings |
+| spread_strategy fee-aware | ✅ Done | Uses `MAKER_FEE_RATE=0` (makers pay zero fees on Polymarket) |
+| terminal_convergence | ✅ Activated | Removed from DISABLED_STRATEGIES; fee-aware (dynamic crypto fee) |
+| cross_asset | ⏭️ Skipped | Disabled in DISABLED_STRATEGIES |
+| WebSocket for prices | ✅ Done | When WS orderbook available, best_bid/best_ask override Gamma |
+
+---
+
 🔴 Critical — Breaking Changes
 1. feeRateBps missing from order signing (client.py → place_order, place_orders_batch)
 Your place_order builds OrderArgs with only price, size, side, token_id. There's no feeRateBps included anywhere. On fee-enabled crypto markets (5-min and 15-min), this causes orders to be silently rejected post-Feb 18. This is the most urgent fix.
@@ -20,8 +34,8 @@ Your bot has a solid architecture overall: retry logic, allowance refresh, batch
 Summary of What Needs Fixing
 Here's the priority order, ranked by impact:
 
-Add dynamic feeRateBps fetching — new method on PolymarketClient, called before every order on crypto markets, passed into OrderArgs. This is the most urgent fix to stop order rejections.
-Enable WebSocket feed — flip the default for ENABLE_WEBSOCKET_FEED to True and validate the websocket_feed.py is actually streaming orderbook data into market_data_cache. Without this, cross_asset latency arb is fundamentally broken post-delay-removal.
-Make cross_asset fee-aware — subtract dynamic fee from edge before firing a signal. If net_edge < fee, skip. Or rethink it as a maker strategy (post limit orders slightly above current mid rather than crossing the spread).
-Make terminal_convergence fee-aware — replace the flat TRADING_FEE_RATE subtraction with the dynamic fee from the API endpoint.
-Make spread_strategy fee-aware — fetch fee rate and use it in net_profit_pct calculation.
+1. ~~Add dynamic feeRateBps fetching~~ — **Done**: py-clob-client handles this automatically when `create_order` is called.
+2. ~~Enable WebSocket feed~~ — **Done**: Default flipped to `true` in config.
+3. Make cross_asset fee-aware — **Skipped**: Strategy disabled in DISABLED_STRATEGIES.
+4. Make terminal_convergence fee-aware — **Skipped**: Strategy disabled in DISABLED_STRATEGIES.
+5. ~~Make spread_strategy fee-aware~~ — **Done**: Uses `MAKER_FEE_RATE=0` (makers pay zero fees; no dynamic fetch needed).

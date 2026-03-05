@@ -102,6 +102,8 @@ class WebSocketFeed:
         self.reconnect_delay = 5
         self.max_reconnect_attempts = 10
         self.reconnect_attempts = 0
+        self._reconnect_lock = threading.Lock()
+        self._reconnect_scheduled = False
     
     def on_orderbook(self, callback: Callable[[OrderbookUpdate], None]):
         """Register callback for orderbook updates."""
@@ -182,24 +184,24 @@ class WebSocketFeed:
             self.messages_received += 1
             self.last_message_time = datetime.now()
             
-            data = json.loads(message)
-            msg_type = data.get("type") or data.get("event_type")
-            
-            # Handle different message types
-            if msg_type == "book" or "book" in str(data.get("channel", "")):
-                self._handle_orderbook(data)
-                
-            elif msg_type == "trade" or "trade" in str(data.get("channel", "")):
-                self._handle_trade(data)
-                
-            elif msg_type == "subscribed":
-                cprint(f"✅ Subscription confirmed", "green")
-                
-            elif msg_type == "pong":
-                pass  # Heartbeat response
-                
-            elif msg_type == "error":
-                cprint(f"⚠️ WebSocket error: {data.get('message')}", "yellow")
+            raw = json.loads(message)
+            # Polymarket may send a single dict or a list of updates
+            payloads = raw if isinstance(raw, list) else [raw]
+            for data in payloads:
+                if not isinstance(data, dict):
+                    continue
+                msg_type = data.get("type") or data.get("event_type")
+                # Handle different message types
+                if msg_type == "book" or "book" in str(data.get("channel", "")):
+                    self._handle_orderbook(data)
+                elif msg_type == "trade" or "trade" in str(data.get("channel", "")):
+                    self._handle_trade(data)
+                elif msg_type == "subscribed":
+                    cprint(f"✅ Subscription confirmed", "green")
+                elif msg_type == "pong":
+                    pass  # Heartbeat response
+                elif msg_type == "error":
+                    cprint(f"⚠️ WebSocket error: {data.get('message')}", "yellow")
                 
         except json.JSONDecodeError:
             pass
@@ -266,7 +268,7 @@ class WebSocketFeed:
         cprint(f"❌ WebSocket error: {error}", "red")
     
     def _on_close(self, ws, close_status_code, close_msg):
-        """Handle WebSocket close."""
+        """Handle WebSocket close. Returns quickly to avoid blocking the library."""
         self.is_connected = False
         reason = f"{close_status_code}: {close_msg}" if close_status_code else "Unknown"
         cprint(f"🔌 WebSocket disconnected: {reason}", "yellow")
@@ -275,12 +277,17 @@ class WebSocketFeed:
         for callback in self._disconnect_callbacks:
             try:
                 callback(reason)
-            except:
+            except Exception:
                 pass
         
-        # Attempt reconnection if still running
+        # Schedule reconnect in a separate thread — do NOT block this callback.
+        # Blocking here causes websocket-client to spin (CPU spike) while waiting.
         if self.is_running:
-            self._reconnect()
+            with self._reconnect_lock:
+                if self._reconnect_scheduled:
+                    return
+                self._reconnect_scheduled = True
+            threading.Thread(target=self._reconnect, daemon=True).start()
     
     def _on_open(self, ws):
         """Handle WebSocket open."""
@@ -317,20 +324,24 @@ class WebSocketFeed:
         thread.start()
     
     def _reconnect(self):
-        """Attempt to reconnect."""
-        if self.reconnect_attempts >= self.max_reconnect_attempts:
-            cprint("❌ Max reconnection attempts reached", "red")
-            self.is_running = False
-            return
-        
-        self.reconnect_attempts += 1
-        delay = self.reconnect_delay * self.reconnect_attempts
-        
-        cprint(f"🔄 Reconnecting in {delay}s (attempt {self.reconnect_attempts})...", "yellow")
-        time.sleep(delay)
-        
-        if self.is_running:
-            self._connect()
+        """Attempt to reconnect. Runs in a daemon thread so we don't block the WS callback."""
+        try:
+            if self.reconnect_attempts >= self.max_reconnect_attempts:
+                cprint("❌ Max reconnection attempts reached", "red")
+                self.is_running = False
+                return
+
+            self.reconnect_attempts += 1
+            delay = self.reconnect_delay * self.reconnect_attempts
+
+            cprint(f"🔄 Reconnecting in {delay}s (attempt {self.reconnect_attempts})...", "yellow")
+            time.sleep(delay)
+
+            if self.is_running:
+                self._connect()
+        finally:
+            with self._reconnect_lock:
+                self._reconnect_scheduled = False
     
     def _connect(self):
         """Establish WebSocket connection."""
@@ -341,8 +352,13 @@ class WebSocketFeed:
             on_error=self._on_error,
             on_close=self._on_close
         )
-        
-        self.ws.run_forever()
+        # skip_utf8_validation=True reduces CPU when connection is flaky (partial frames).
+        # ping_interval=None: disable library ping — we use Polymarket-specific heartbeat.
+        # Avoids ping/pong timeout recursion (websocket-client#858) on disconnect.
+        self.ws.run_forever(
+            skip_utf8_validation=True,
+            ping_interval=None,
+        )
     
     def start(self, blocking: bool = False):
         """

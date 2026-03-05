@@ -28,8 +28,11 @@ from .config import (
     BALANCE_REFRESH_SECONDS,
     MARKET_REFRESH_SECONDS,
     MAX_HOURS_TO_EXPIRY,
+    SHORTTERM_NEAREST_CYCLE_ONLY,
+    SHORTTERM_MAX_HOURS_AHEAD,
     ENABLE_WEBSOCKET_FEED,
     ENABLE_BTC_5MIN,
+    TERMINAL_CONVERGENCE_1H_ONLY,
     PAPER_TRADING,
     CRYPTO_MARKET_KEYWORDS,
     ONLY_CRYPTO_MARKETS,
@@ -50,6 +53,7 @@ from .config import (
     TRADING_FEE_RATE,
     BALANCE_STALE_BLOCK_BUYS,
     BALANCE_STALE_MAX_SECONDS,
+    POLYMARKET_MIN_ORDER_SIZE,
     print_config,
     validate_config,
     ENABLE_STRATEGY_ANALYTICS,
@@ -151,8 +155,10 @@ class PolymarketBot:
         merged_config = dict(strategy_config or {})
         merged_config["client"] = self.client
         merged_config["risk_manager"] = self.risk_manager
+        merged_config["store"] = self.store
         if self.binance_feed:
             merged_config["binance_feed"] = self.binance_feed
+        merged_config["1h_only"] = TERMINAL_CONVERGENCE_1H_ONLY
         
         # Multi-strategy mode
         self.multi_strategy_mode = (strategy == "all")
@@ -311,7 +317,9 @@ class PolymarketBot:
         cprint(f"   Scan Interval: {SCAN_INTERVAL_SECONDS}s", "white")
         cprint(f"   Mode: {'WebSocket + REST' if ENABLE_WEBSOCKET_FEED else 'REST API polling'}", "white")
         if self.binance_feed:
-            cprint(f"   Binance Feed: ✅ streaming BTC/USDT", "cyan")
+            syms = getattr(self.binance_feed, "symbols", ["btcusdt"])
+            sym_str = ",".join(s.upper() for s in syms)
+            cprint(f"   Binance Feed: ✅ {sym_str}", "cyan")
         if self.risk_manager.adaptive_enabled:
             cprint(f"   Adaptive Risk: ✅ bankroll-proportional", "cyan")
         cprint("\n   Press Ctrl+C to stop\n", "yellow")
@@ -577,11 +585,11 @@ class PolymarketBot:
                         # Adaptive risk should resize actual execution, not just checks.
                         if sig.price > 0:
                             adaptive_shares = adaptive_size / sig.price
-                            if adaptive_shares < 0.1:
+                            if adaptive_shares < POLYMARKET_MIN_ORDER_SIZE:
                                 n_blocked += 1
-                                block_reason = "Adaptive size below 0.1 share minimum"
+                                block_reason = f"Size below Polymarket minimum ({POLYMARKET_MIN_ORDER_SIZE:.0f} shares)"
                                 continue
-                            exec_signal = replace(sig, size=round(adaptive_shares, 4))
+                            exec_signal = replace(sig, size=round(max(POLYMARKET_MIN_ORDER_SIZE, adaptive_shares), 4))
                             resized = abs(exec_signal.size - sig.size) > 0.0001
 
                             # Visibility: show when adaptive risk materially resizes BUYs.
@@ -811,22 +819,21 @@ class PolymarketBot:
                 best_bid = float(market.get("bestBid", 0) or 0)
                 best_ask = float(market.get("bestAsk", 1) or 1)
                 
-                # Check if this is a BTC short-term market (from events)
+                # Check if this is a crypto short-term market (5m, 15m, 1h, 4h from events)
                 q_lower = market.get("question", "").lower()
                 slug_lower = market.get("slug", "").lower()
                 mtext = f"{q_lower} {slug_lower}"
-                is_btc_st = (
-                    any(kw in mtext for kw in ["bitcoin", "btc"])
+                is_crypto_st = (
+                    any(kw in mtext for kw in ["bitcoin", "btc", "ethereum", "eth", "solana", "sol", "xrp"])
                     and any(kw in mtext for kw in BTC_5MIN_KEYWORDS)
                 )
                 
-                # Skip if no valid prices
-                # BTC short-term: use 50/50 only when we have *some* price (stale data).
-                # When best_bid=0 AND best_ask=0 → no orderbook → skip (avoids 24h-out empty markets)
+                # Skip if no valid prices (non-crypto). Crypto short-term: use synthetic so spread sees them.
+                # Gamma/events often lack bestBid/bestAsk; WebSocket will override per-token if available.
+                # Also allow threshold/combo_arb markets (above/below) through with synthetic fallback.
+                is_threshold = any(kw in mtext for kw in ["above", "below", "over", "under", "exceed", "reach"])
                 if best_bid <= 0 or best_ask <= 0 or best_ask >= 1:
-                    if is_btc_st:
-                        if best_bid <= 0 and (best_ask <= 0 or best_ask >= 1):
-                            continue  # no real book
+                    if is_crypto_st or is_threshold:
                         best_bid = 0.50 if best_bid <= 0 else best_bid
                         best_ask = 0.52 if best_ask <= 0 or best_ask >= 1 else best_ask
                     else:
@@ -892,14 +899,19 @@ class PolymarketBot:
                         if (t.get("asset_id") or t.get("token_id")) == token_id
                     ]
 
-                    end_ts = self._parse_market_end_ts(market) if is_btc_st else None
+                    end_ts = self._parse_market_end_ts(market) if is_crypto_st else None
 
-                    # Attach orderbook from WebSocket cache if available
+                    # Prefer WebSocket orderbook for best_bid/best_ask when available (real-time)
                     ob_data = None
                     if hasattr(self, 'feed') and self.feed:
                         ws_ob = self.feed.get_latest_orderbook(token_id)
                         if ws_ob is not None:
                             ob_data = {"bids": ws_ob.bids, "asks": ws_ob.asks}
+                            # Override Gamma prices with WebSocket for latency-sensitive strategies
+                            t_bid = float(ws_ob.best_bid) if ws_ob.bids else t_bid
+                            t_ask = float(ws_ob.best_ask) if ws_ob.asks else t_ask
+                            t_mid = (t_bid + t_ask) / 2
+                            t_spread = t_ask - t_bid
 
                     data = MarketData(
                         token_id=token_id,
@@ -1009,7 +1021,13 @@ class PolymarketBot:
                             continue
                         if not sub_market.get("acceptingOrders"):
                             continue
-                        markets.append(sub_market)
+                        # Enrich with event context (Gamma may omit question/slug on sub-markets)
+                        sm = dict(sub_market)
+                        if not sm.get("question"):
+                            sm["question"] = event.get("title", "")
+                        if not sm.get("slug"):
+                            sm["slug"] = event.get("slug", "")
+                        markets.append(sm)
                         event_market_count += 1
                 if event_market_count > 0:
                     cprint(f"📡 Found {event_market_count} crypto event markets from /events", "cyan")
@@ -1019,6 +1037,17 @@ class PolymarketBot:
             seen_ids = set()
             now_ts = time.time()
             max_expiry_sec = MAX_HOURS_TO_EXPIRY * 3600 if MAX_HOURS_TO_EXPIRY > 0 else 0
+            # Strict short-term duration markers (exclude generic "up or down" without timeframe).
+            shortterm_duration_markers = [
+                "5m", "15m", "1h", "4h",
+                "5 min", "5-min", "5min", "5-minute", "5 minute",
+                "15 min", "15-min", "15min",
+                "1 hour", "4 hour", "4-hour",
+                "updown-5m", "updown-15m", "updown-1h", "updown-4h",
+                "up or down - 5 min", "up or down - 15 min",
+                "up or down - 1 hour", "up or down - 1h",
+                "up or down - 4 hour", "up or down - 4h",
+            ]
 
             def _market_end_ts(m: dict) -> Optional[float]:
                 """Parse market end/resolution timestamp. Returns Unix sec or None."""
@@ -1049,9 +1078,13 @@ class PolymarketBot:
                 return None
 
             for market in markets:
-                question = market.get("question", "").lower()
-                slug = market.get("slug", "").lower()
+                question = (market.get("question") or market.get("title") or "").lower()
+                slug = (market.get("slug") or market.get("market_slug") or "").lower()
                 text = f"{question} {slug}"
+                is_crypto_shortterm = (
+                    any(kw in text for kw in ["bitcoin", "btc", "ethereum", "eth", "solana", "sol", "xrp"])
+                    and any(kw in text for kw in shortterm_duration_markers)
+                )
                 
                 # Deduplicate by conditionId
                 cid = market.get("conditionId") or market.get("condition_id") or market.get("id")
@@ -1063,7 +1096,8 @@ class PolymarketBot:
                 # Exempt threshold markets (combo_arb). Filter far-dated non-threshold (e.g. up/down buckets).
                 if max_expiry_sec > 0:
                     is_threshold = any(kw in text for kw in ["above", "below", "over", "under", "exceed", "reach"])
-                    if not is_threshold:
+                    # Short-term cycle mode applies a tighter per-bucket nearest filter below.
+                    if not is_threshold and not (SHORTTERM_NEAREST_CYCLE_ONLY and is_crypto_shortterm):
                         end_ts = _market_end_ts(market)
                         if end_ts is not None and (end_ts - now_ts) > max_expiry_sec:
                             continue
@@ -1078,18 +1112,83 @@ class PolymarketBot:
                 if market.get("closed"):
                     continue
                 
-                # BTC short-term markets get a lower volume threshold
-                is_btc_shortterm = (
-                    any(kw in text for kw in ["bitcoin", "btc"])
-                    and any(kw in text for kw in BTC_5MIN_KEYWORDS)
-                )
-                
-                volume = float(market.get("volume24hr", 0) or 0)
-                min_vol = 0 if is_btc_shortterm else MIN_VOLUME_USD
+                # Crypto short-term (5m/15m/1h/4h from events) often have 0 volume — bypass
+                # Threshold markets (combo_arb) also bypass volume floor — many have low 24h volume
+                is_threshold_mkt = any(kw in text for kw in ["above", "below", "over", "under", "exceed", "reach"])
+                volume = float(market.get("volume24hr", 0) or market.get("volume24hrClob", 0) or 0)
+                min_vol = 0 if (is_crypto_shortterm or is_threshold_mkt) else MIN_VOLUME_USD
                 if volume < min_vol:
                     continue
                 
                 filtered.append(market)
+
+            if SHORTTERM_NEAREST_CYCLE_ONLY and filtered:
+                shortterm_max_sec = (
+                    SHORTTERM_MAX_HOURS_AHEAD * 3600
+                    if SHORTTERM_MAX_HOURS_AHEAD > 0
+                    else max_expiry_sec
+                )
+                def _shortterm_bucket(text: str) -> Optional[str]:
+                    asset = None
+                    if "bitcoin" in text or "btc" in text:
+                        asset = "btc"
+                    elif "ethereum" in text or "eth" in text:
+                        asset = "eth"
+                    elif "solana" in text or "sol" in text:
+                        asset = "sol"
+                    elif "xrp" in text:
+                        asset = "xrp"
+                    if not asset:
+                        return None
+
+                    if any(k in text for k in ["5m", "5 min", "5-min", "5min", "5-minute", "updown-5m"]):
+                        dur = "5m"
+                    elif any(k in text for k in ["15m", "15 min", "15-min", "15min", "updown-15m"]):
+                        dur = "15m"
+                    elif any(k in text for k in ["1h", "1 hour", "updown-1h"]):
+                        dur = "1h"
+                    elif any(k in text for k in ["4h", "4 hour", "4-hour", "updown-4h"]):
+                        dur = "4h"
+                    else:
+                        return None
+                    return f"{asset}:{dur}"
+
+                nearest_by_bucket: Dict[str, tuple] = {}
+                kept_non_shortterm = []
+                shortterm_seen = 0
+
+                for market in filtered:
+                    question = (market.get("question") or market.get("title") or "").lower()
+                    slug = (market.get("slug") or market.get("market_slug") or "").lower()
+                    text = f"{question} {slug}"
+                    bucket = _shortterm_bucket(text)
+                    if not bucket:
+                        kept_non_shortterm.append(market)
+                        continue
+
+                    end_ts = _market_end_ts(market)
+                    if end_ts is None:
+                        # In nearest short-term mode, we require a parseable expiry.
+                        # Otherwise far-future buckets can leak through.
+                        continue
+
+                    remaining = end_ts - now_ts
+                    if remaining < 0:
+                        continue
+                    if shortterm_max_sec > 0 and remaining > shortterm_max_sec:
+                        continue
+                    shortterm_seen += 1
+                    current = nearest_by_bucket.get(bucket)
+                    if current is None or remaining < current[0]:
+                        nearest_by_bucket[bucket] = (remaining, market)
+
+                nearest_shortterm = [v[1] for v in nearest_by_bucket.values()]
+                filtered = kept_non_shortterm + nearest_shortterm
+                cprint(
+                    f"⏱️ Short-term nearest-cycle filter: {len(nearest_shortterm)} kept "
+                    f"across {len(nearest_by_bucket)} buckets (from {shortterm_seen})",
+                    "cyan",
+                )
             
             refreshed_markets: Dict[str, Dict] = {}
             for market in filtered:
@@ -1113,9 +1212,15 @@ class PolymarketBot:
                 for token in market.get("tokens", []):
                     if token.get("token_id"):
                         token_ids.append(token["token_id"])
+                # Fallback: clobTokenIds (used by Gamma / events)
+                for tid in market.get("clobTokenIds", []) or []:
+                    if isinstance(tid, str) and tid:
+                        token_ids.append(tid)
+                    elif isinstance(tid, dict) and tid.get("token_id"):
+                        token_ids.append(tid["token_id"])
             
             if token_ids:
-                self.feed.subscribe(token_ids[:50])  # Limit subscriptions
+                self.feed.subscribe(list(dict.fromkeys(token_ids))[:50])  # Dedupe, limit 50
                 
         except Exception as e:
             cprint(f"❌ Error fetching markets: {e}", "red")
@@ -1126,18 +1231,19 @@ class PolymarketBot:
             return
 
         try:
-            current_tokens = {
-                token.get("token_id")
-                for market in self.markets.values()
-                for token in market.get("tokens", [])
-                if token.get("token_id")
-            }
-            new_tokens = {
-                token.get("token_id")
-                for market in refreshed_markets.values()
-                for token in market.get("tokens", [])
-                if token.get("token_id")
-            }
+            def _collect_token_ids(markets_dict):
+                out = set()
+                for market in markets_dict.values():
+                    for token in market.get("tokens", []):
+                        if token.get("token_id"):
+                            out.add(token["token_id"])
+                    for tid in market.get("clobTokenIds", []) or []:
+                        if isinstance(tid, str) and tid:
+                            out.add(tid)
+                return out
+
+            current_tokens = _collect_token_ids(self.markets)
+            new_tokens = _collect_token_ids(refreshed_markets)
 
             tokens_to_unsubscribe = list(current_tokens - new_tokens)
             tokens_to_subscribe = list(new_tokens - current_tokens)
@@ -1328,7 +1434,7 @@ class PolymarketBot:
         # Record exit in analytics tracker
         strategy_name = order.metadata.get("strategy", "unknown") if order.metadata else "unknown"
         if fill_data.get("side") == "SELL" and order.metadata and self.analytics_enabled and self.strategy_tracker:
-            entry_price = order.metadata.get("entry_price", order.price)
+            entry_price = order.metadata.get("entry_price") or order.price
             pnl = (fill_data.get("price", 0) - entry_price) * fill_data.get("size", 0)
             self.strategy_tracker.record_trade(
                 strategy=strategy_name,

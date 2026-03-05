@@ -31,12 +31,27 @@ from ..logging_utils import cprint
 from ..config import (
     TERMINAL_CONVERGENCE_WINDOW_SECONDS,
     TERMINAL_MIN_EDGE_CENTS,
+    TERMINAL_CONVERGENCE_1H_ONLY,
+    TERMINAL_1H_KEYWORDS,
+    TERMINAL_NON_1H_KEYWORDS,
     BTC_5MIN_KEYWORDS,
     ORDER_SIZE_USD,
     MAX_POSITION_USD,
     TRADING_FEE_RATE,
     ENABLE_BTC_5MIN,
 )
+
+
+def _crypto_taker_fee_cents(price: float) -> float:
+    """
+    Crypto market taker fee in cents per share (Polymarket 2026 formula).
+    fee = C × p × 0.25 × (p × (1-p))^2 → effective rate 0.25*(p*(1-p))^2.
+    At 50%: ~1.56%. Returns fee in cents per share (for edge subtraction).
+    """
+    if price <= 0 or price >= 1:
+        return 0.0
+    # Fee per share = price * 0.25 * (p*(1-p))^2; in cents: 25 * p * (p*(1-p))^2
+    return 25.0 * price * (price * (1.0 - price)) ** 2
 
 
 class TerminalConvergenceStrategy(BaseStrategy):
@@ -70,6 +85,7 @@ class TerminalConvergenceStrategy(BaseStrategy):
         self.order_size_usd = self.config.get("order_size_usd", ORDER_SIZE_USD)
         self.max_position_usd = self.config.get("max_position_usd", MAX_POSITION_USD)
         self.min_certainty = self.config.get("min_certainty", 0.80)
+        self._1h_only = self.config.get("1h_only", TERMINAL_CONVERGENCE_1H_ONLY)
 
         # Track positions
         self.positions: Dict[str, float] = {}
@@ -77,31 +93,44 @@ class TerminalConvergenceStrategy(BaseStrategy):
         self.signal_cooldown_s = self.config.get("signal_cooldown_s", 15)
 
     def should_trade_market(self, market_data: MarketData) -> bool:
-        """Only trade 5-min BTC markets that are within the convergence window (near expiry)."""
+        """Trade crypto 1h Up/Down markets within the convergence window (near expiry)."""
         if not ENABLE_BTC_5MIN:
             return False
 
         text = f"{market_data.question} {market_data.market_slug}".lower()
 
-        # Must be BTC + short-term
-        is_btc = any(kw in text for kw in ["bitcoin", "btc"])
-        is_5min = any(kw in text for kw in BTC_5MIN_KEYWORDS)
-        if not (is_btc and is_5min):
+        # Must be crypto (BTC, ETH, SOL, etc.)
+        is_crypto = any(kw in text for kw in ["bitcoin", "btc", "ethereum", "eth", "solana", "sol", "xrp"])
+        # 1h-only mode: only 1h Up/Down (Binance = resolution source)
+        # Match: "1h", "hourly", etc. OR "up or down" when NOT 5m/15m/4h
+        # e.g. "Bitcoin Up or Down - March 4, 1PM ET"
+        if self._1h_only:
+            is_shortterm = any(kw in text for kw in TERMINAL_1H_KEYWORDS) or (
+                "up or down" in text and not any(kw in text for kw in TERMINAL_NON_1H_KEYWORDS)
+            )
+        else:
+            is_shortterm = any(kw in text for kw in BTC_5MIN_KEYWORDS)
+        if not (is_crypto and is_shortterm):
             return False
 
         # Must be within convergence window (seconds before expiry)
         end_ts = getattr(market_data, "end_date_ts", None)
         if end_ts is None:
             return False
-        sec_to_expiry = end_ts - time.time()
+        now_ts = getattr(market_data, "timestamp", None)
+        now_ts = now_ts.timestamp() if hasattr(now_ts, "timestamp") else (now_ts if isinstance(now_ts, (int, float)) else None)
+        sec_to_expiry = (end_ts - now_ts) if now_ts else (end_ts - time.time())
         if sec_to_expiry < 0:
             return False  # already expired
-        if sec_to_expiry > self.convergence_window_s:
-            return False  # too far from expiry (e.g. 2 days ahead)
+        # 1h markets: use 120s window; 5m/15m: use config
+        window = 120 if self._1h_only else self.convergence_window_s
+        if sec_to_expiry > window:
+            return False  # too far from expiry
 
-        # Check cooldown
+        # Check cooldown (use replay timestamp when available for backtest)
+        now = now_ts if now_ts else time.time()
         last_t = self.last_signal_time.get(market_data.token_id, 0)
-        if time.time() - last_t < self.signal_cooldown_s:
+        if now - last_t < self.signal_cooldown_s:
             return False
 
         return True
@@ -122,8 +151,7 @@ class TerminalConvergenceStrategy(BaseStrategy):
         if not self.binance_feed:
             return signals
 
-        binance = self.binance_feed.get_state()
-        if not binance.connected or binance.last_price <= 0:
+        if not self.binance_feed.connected:
             return signals
 
         n_eligible = 0
@@ -140,47 +168,64 @@ class TerminalConvergenceStrategy(BaseStrategy):
             if current_pos >= self.max_position_usd:
                 continue
 
+            # Asset-specific feed (BTC, ETH, SOL, XRP)
+            asset = self._get_asset_from_market(data)
+            binance = self.binance_feed.get_state(asset)
+            if not binance.last_price > 0:
+                continue
+
             # Parse what the market is asking and extract the strike price
             strike_info = self._parse_strike(data.question, data.outcome)
             if not strike_info:
                 continue
 
             strike_price, direction, outcome_label = strike_info
+            price_to_beat = strike_price  # used in signal reason
 
-            # Determine if the current BTC price makes this outcome near-certain
-            btc_price = binance.last_price
+            # Determine if the current price makes this outcome near-certain
+            spot_price = binance.last_price
 
             if direction == "up_or_down":
-                # For "Up or Down" markets: use BTC momentum to estimate probability
-                # These resolve based on whether BTC went up or down over the window
-                move_10s = binance.price_change_pct_10s
-                move_30s = binance.price_change_pct_30s
-                move_60s = binance.price_change_pct_60s
-                pressure = binance.bid_pressure  # 0-1, >0.5 = buying
-                
-                # Require actual price movement — bid_pressure alone is too noisy
-                price_move = max(abs(move_10s), abs(move_30s), abs(move_60s))
-                if price_move < 0.02:  # need at least 0.02% real move
-                    continue
-                
-                # Primary: price movement direction; secondary: pressure as tiebreaker
-                momentum = (
-                    move_60s * 0.40
-                    + move_30s * 0.35
-                    + move_10s * 0.15
-                    + (pressure - 0.5) * 0.10
-                )
-                
-                if outcome_label.lower() == "up":
-                    estimated_prob = 0.50 + momentum * 2.5
+                if self._1h_only:
+                    # 1h Up/Down: Polymarket resolves via Binance 1h candle.
+                    # Price to Beat = candle open. Use Binance REST kline.
+                    candle_open = self.binance_feed.get_1h_candle_open(asset) if hasattr(self.binance_feed, "get_1h_candle_open") else None
+                    if candle_open is None or candle_open <= 0:
+                        continue
+                    price_to_beat = candle_open
+                    diff_pct = (spot_price - candle_open) / candle_open * 100
+                    # Need clear direction: |diff| >= 0.03% (~$30 on $100k BTC)
+                    if abs(diff_pct) < 0.03:
+                        continue
+                    if outcome_label.lower() == "up":
+                        estimated_prob = 0.98 if diff_pct > 0 else 0.02
+                    else:
+                        estimated_prob = 0.98 if diff_pct < 0 else 0.02
+                    estimated_prob = max(0.02, min(0.98, estimated_prob))
                 else:
-                    estimated_prob = 0.50 - momentum * 2.5
-                
-                estimated_prob = max(0.05, min(0.95, estimated_prob))
+                    # 5m/15m: use momentum (Chainlink resolution — less accurate with Binance)
+                    move_10s = binance.price_change_pct_10s
+                    move_30s = binance.price_change_pct_30s
+                    move_60s = binance.price_change_pct_60s
+                    pressure = binance.bid_pressure  # 0-1, >0.5 = buying
+                    price_move = max(abs(move_10s), abs(move_30s), abs(move_60s))
+                    if price_move < 0.02:  # need at least 0.02% real move
+                        continue
+                    momentum = (
+                        move_60s * 0.40
+                        + move_30s * 0.35
+                        + move_10s * 0.15
+                        + (pressure - 0.5) * 0.10
+                    )
+                    if outcome_label.lower() == "up":
+                        estimated_prob = 0.50 + momentum * 2.5
+                    else:
+                        estimated_prob = 0.50 - momentum * 2.5
+                    estimated_prob = max(0.05, min(0.95, estimated_prob))
             else:
                 # Traditional strike-based markets
                 estimated_prob = self._estimate_terminal_prob(
-                    btc_price, strike_price, direction, binance.volatility_5m
+                    spot_price, strike_price, direction, binance.volatility_5m
                 )
 
             best_prob = max(best_prob, estimated_prob)
@@ -200,19 +245,20 @@ class TerminalConvergenceStrategy(BaseStrategy):
             if edge_cents < self.min_edge_cents:
                 continue
 
-            # Account for fees
-            net_edge_cents = edge_cents - (TRADING_FEE_RATE * 100)
+            # Account for taker fees (5-min/15-min crypto markets use dynamic fee)
+            fee_cents = _crypto_taker_fee_cents(market_price)
+            net_edge_cents = edge_cents - fee_cents
             if net_edge_cents < 1.0:  # need at least 1¢ net edge
                 continue
 
-            # Confidence: higher when BTC is further from strike / probability is more extreme
+            # Confidence: higher when spot is further from strike / probability is more extreme
             if direction == "up_or_down":
                 # For momentum-based: confidence from how extreme the probability is
                 prob_dist = abs(estimated_prob - 0.50)
                 confidence = min(0.55 + prob_dist * 1.5, 0.95)
             else:
-                btc_dist_pct = abs(btc_price - strike_price) / max(strike_price, 1) * 100
-                confidence = min(0.60 + btc_dist_pct * 0.10, 0.95)
+                spot_dist_pct = abs(spot_price - strike_price) / max(strike_price, 1) * 100
+                confidence = min(0.60 + spot_dist_pct * 0.10, 0.95)
 
             # Size the bet
             bet_size = self._size_bet(estimated_prob, market_price, data.token_id)
@@ -224,6 +270,8 @@ class TerminalConvergenceStrategy(BaseStrategy):
             buy_price = round(max(0.01, min(0.99, buy_price)), 3)
             shares = bet_size / buy_price
 
+            asset_upper = asset.upper()
+            ref_label = "open" if (self._1h_only and direction == "up_or_down") else "strike"
             signal = Signal(
                 signal_type=SignalType.BUY,
                 token_id=data.token_id,
@@ -233,12 +281,14 @@ class TerminalConvergenceStrategy(BaseStrategy):
                 size=round(shares, 2),
                 confidence=round(confidence, 3),
                 reason=(
-                    f"Terminal convergence: BTC=${btc_price:,.0f} vs strike=${strike_price:,.0f} "
+                    f"Terminal convergence: {asset_upper}=${spot_price:,.0f} vs {ref_label}=${price_to_beat:,.0f} "
                     f"({direction}) | edge={edge_cents:.1f}¢ | est={estimated_prob:.3f} mkt={market_price:.3f}"
                 ),
                 metadata={
-                    "btc_price": btc_price,
+                    "asset": asset,
+                    "spot_price": spot_price,
                     "strike_price": strike_price,
+                    "price_to_beat": price_to_beat,
                     "direction": direction,
                     "estimated_prob": estimated_prob,
                     "market_prob": market_price,
@@ -263,19 +313,25 @@ class TerminalConvergenceStrategy(BaseStrategy):
             cprint(f"  🏁 {sig}", "green")
 
         # Status for TUI (always visible)
-        self._last_scan_status = f"{n_eligible} in window"
+        mode = "1h-only" if self._1h_only else "5m/15m/1h/4h"
+        self._last_scan_status = f"{n_eligible} in window" if n_eligible > 0 else f"0 ({mode})"
 
-        # Diagnostic summary — throttled to avoid flooding the Activity Log
-        if not signals and n_eligible > 0:
-            now = time.time()
-            last_diag = getattr(self, '_last_diag_log', 0)
-            if now - last_diag >= 30:  # log at most every 30s
-                self._last_diag_log = now
+        # Diagnostic — throttled; log when eligible but no signals, or periodically when 0 eligible
+        now = time.time()
+        last_diag = getattr(self, '_last_diag_log', 0)
+        if now - last_diag >= 45:  # log at most every 45s
+            self._last_diag_log = now
+            if not signals and n_eligible > 0:
                 edge_str = f"{best_edge:+.1f}¢" if best_edge > -999 else "n/a"
                 cprint(
-                    f"  📊 terminal_conv funnel: {n_eligible} eligible | "
+                    f"  📊 terminal_conv [{mode}]: {n_eligible} eligible | "
                     f"best_prob={best_prob:.3f} (need ≥{self.min_certainty}) | "
                     f"best_edge={edge_str} (need ≥{self.min_edge_cents}¢)",
+                    "dark_grey",
+                )
+            elif not signals and n_eligible == 0 and self._1h_only:
+                cprint(
+                    f"  📊 terminal_conv [1h-only]: 0 markets in 120s window | waiting for next 1h expiry",
                     "dark_grey",
                 )
 
@@ -323,6 +379,18 @@ class TerminalConvergenceStrategy(BaseStrategy):
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _get_asset_from_market(market_data: MarketData) -> str:
+        """Infer asset (btc, eth, sol, xrp) from market question/slug."""
+        text = f"{market_data.question} {market_data.market_slug}".lower()
+        if "ethereum" in text or " eth " in text or "eth" in text.split():
+            return "eth"
+        if "solana" in text or " sol " in text or "sol" in text.split():
+            return "sol"
+        if "xrp" in text:
+            return "xrp"
+        return "btc"
 
     @staticmethod
     def _parse_strike(question: str, outcome: str = "Yes"):

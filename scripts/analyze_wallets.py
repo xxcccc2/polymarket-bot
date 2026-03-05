@@ -1,72 +1,28 @@
 #!/usr/bin/env python3
 """
-Reverse-engineer Polymarket wallets to discover their trading strategies.
+Analyze tracked wallets for wallet_copy feasibility.
+
+Outputs: copyability, sell rate, crypto %, trade sizes, overlap, and feasibility
+of running all together.
 
 Usage:
-  python scripts/analyze_wallets.py
-  # or with custom wallets:
   TRACKED_WALLETS=0xabc,0xdef python scripts/analyze_wallets.py
-
-Note: If you hit proxy errors, run with proxies disabled:
-  unset http_proxy https_proxy; python scripts/analyze_wallets.py
 """
 
 import os
 import sys
-
-# Avoid proxy blocking Data API (common in corporate envs)
-for k in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
-    os.environ.pop(k, None)
+import time
 from collections import defaultdict
 
-# Add project root
+for k in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
+    os.environ.pop(k, None)
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from src.data_client import get_trades_by_user, get_positions, get_leaderboard
-
-
-def _categorize_market(trade: dict) -> str:
-    """Infer market category from trade metadata."""
-    title = (trade.get("title") or "").lower()
-    slug = (trade.get("slug") or trade.get("eventSlug") or "").lower()
-    text = f"{title} {slug}"
-    if any(kw in text for kw in ["bitcoin", "btc"]):
-        if any(kw in text for kw in ["up or down", "5 min", "15 min", "1 hour"]):
-            return "btc_shortterm"
-        return "btc"
-    if any(kw in text for kw in ["ethereum", "eth", "solana", "sol", "xrp"]):
-        return "crypto"
-    if any(kw in text for kw in ["trump", "biden", "election", "president"]):
-        return "politics"
-    if any(kw in text for kw in ["sport", "nfl", "nba", "mlb", "game"]):
-        return "sports"
-    if any(kw in text for kw in ["fed", "rate", "inflation", "gdp"]):
-        return "macro"
-    return "other"
+from src.data_client import get_trades_by_user
+from src.wallet_rotation.metrics import compute_wallet_metrics, _categorize_market, _infer_horizon
 
 
-def _infer_horizon(trade: dict) -> str:
-    """Infer time horizon from slug (e.g. btc-updown-15m-1234567890)."""
-    slug = (trade.get("slug") or trade.get("eventSlug") or "").lower()
-    if "5 min" in slug or "5min" in slug or "-5m-" in slug:
-        return "5min"
-    if "15 min" in slug or "15min" in slug or "-15m-" in slug:
-        return "15min"
-    if "1 hour" in slug or "1h" in slug or "-1h-" in slug:
-        return "1h"
-    if "day" in slug or "daily" in slug:
-        return "daily"
-    if "week" in slug or "month" in slug or "year" in slug or "2025" in slug or "2026" in slug:
-        return "longterm"
-    return "unknown"
-
-
-def analyze_wallet(addr: str, max_trades: int = 200) -> dict:
-    """Fetch and analyze a wallet's trades and positions."""
-    addr = addr.strip()
-    if not addr or not addr.startswith("0x"):
-        return None
-
+def _fetch_trades(addr: str, max_trades: int = 300) -> list:
     trades = []
     offset = 0
     while len(trades) < max_trades:
@@ -77,110 +33,160 @@ def analyze_wallet(addr: str, max_trades: int = 200) -> dict:
         if len(batch) < 100:
             break
         offset += len(batch)
-    trades = trades[:max_trades]
+        time.sleep(0.15)
+    return trades[:max_trades]
 
-    positions = get_positions(addr, limit=200)
 
+def _is_crypto(trade: dict) -> bool:
+    title = (trade.get("title") or "").lower()
+    slug = (trade.get("slug") or trade.get("eventSlug") or "").lower()
+    text = f"{title} {slug}"
+    return any(kw in text for kw in ["bitcoin", "btc", "ethereum", "eth", "solana", "sol", "crypto", "xrp"])
+
+
+def analyze_wallet(addr: str, min_trade_usd: float = 3) -> dict:
+    trades = _fetch_trades(addr)
     buys = [t for t in trades if (t.get("side") or "").upper() == "BUY"]
     sells = [t for t in trades if (t.get("side") or "").upper() == "SELL"]
 
-    categories = defaultdict(int)
-    horizons = defaultdict(int)
-    buy_values = []
-    sell_values = []
+    crypto_buys = [t for t in buys if _is_crypto(t)]
 
-    for t in trades:
-        cat = _categorize_market(t)
-        categories[cat] += 1
-        hor = _infer_horizon(t)
-        horizons[hor] += 1
-        size = float(t.get("size", 0) or 0)
-        price = float(t.get("price", 0) or 0)
-        val = size * price
-        if (t.get("side") or "").upper() == "BUY":
-            buy_values.append(val)
-        else:
-            sell_values.append(val)
+    def _usd(t):
+        return (float(t.get("size", 0) or 0) * float(t.get("price", 0) or 0))
 
-    pos_by_cat = defaultdict(list)
-    for p in positions:
-        title = (p.get("title") or p.get("slug") or "").lower()
-        cat = "btc_shortterm" if "up or down" in title and "bitcoin" in title else _categorize_market(p)
-        pos_by_cat[cat].append(p)
+    copyable_buys = [t for t in crypto_buys if _usd(t) >= min_trade_usd]
+
+    sell_ratio = len(sells) / len(buys) if buys else 0
+    crypto_pct = 100 * len(crypto_buys) / len(buys) if buys else 0
+    copyable_pct = 100 * len(copyable_buys) / len(crypto_buys) if crypto_buys else 0
+
+    buy_usds = [(float(t.get("size", 0) or 0) * float(t.get("price", 0) or 0)) for t in buys]
+    avg_buy_usd = sum(buy_usds) / len(buy_usds) if buy_usds else 0
+    below_min = sum(1 for u in buy_usds if u < min_trade_usd)
+
+    # Unique tokens traded
+    tokens_bought = set()
+    for t in buys:
+        aid = t.get("asset") or t.get("asset_id")
+        if aid:
+            tokens_bought.add(aid)
+
+    metrics = compute_wallet_metrics(addr, max_trades=200, sleep_between_pages=0.15)
+    mm_like = metrics.get("mm_like", False) if metrics else False
+    vf_like = metrics.get("volume_farmer_like", False) if metrics else False
 
     return {
-        "address": addr,
+        "addr": addr,
         "n_trades": len(trades),
         "n_buys": len(buys),
         "n_sells": len(sells),
-        "n_positions": len(positions),
-        "categories": dict(categories),
-        "horizons": dict(horizons),
-        "avg_buy_usd": sum(buy_values) / len(buy_values) if buy_values else 0,
-        "avg_sell_usd": sum(sell_values) / len(sell_values) if sell_values else 0,
-        "total_buy_usd": sum(buy_values),
-        "total_sell_usd": sum(sell_values),
-        "positions_by_cat": {k: len(v) for k, v in pos_by_cat.items()},
-        "sample_titles": [x for x in dict.fromkeys(t.get("title") or t.get("slug") or "" for t in trades[:30]) if x],
+        "sell_ratio": sell_ratio,
+        "crypto_pct": crypto_pct,
+        "copyable_buys": len(copyable_buys),
+        "copyable_pct": copyable_pct,
+        "avg_buy_usd": avg_buy_usd,
+        "below_min_usd": below_min,
+        "tokens_bought": tokens_bought,
+        "metrics": metrics,
+        "mm_like": mm_like,
+        "volume_farmer_like": vf_like,
     }
 
 
 def main():
     wallets_env = os.getenv(
         "TRACKED_WALLETS",
-        "0x1979ae6b7e6534de9c4539d0c205e582ca637c9d,0xd84c2b6d65dc596f49c7b6aadd6d74ca91e407b9,0x1d0034134e339a309700ff2d34e99fa2d48b0313",
+        "0xe00740bce98a594e26861838885ab310ec3b548c,0x4c353dd347c2e7d8bcdc5cd6ee569de7baf23e2f,"
+        "0x63ce342161250d705dc0b16df89036c8e5f9ba9a,0x2d8b401d2f0e6937afebf18e19e11ca568a5260a,"
+        "0xd84c2b6d65dc596f49c7b6aadd6d74ca91e407b9",
     )
     wallets = [w.strip() for w in wallets_env.split(",") if w.strip()]
+    min_trade_usd = float(os.getenv("WALLET_COPY_MIN_TRADE_USD", "3"))
 
-    print("=" * 70)
-    print("Polymarket Wallet Strategy Analysis")
-    print("=" * 70)
+    print("=" * 75)
+    print("  WALLET COPY FEASIBILITY ANALYSIS")
+    print("=" * 75)
+    print(f"  Wallets: {len(wallets)}  |  Min trade USD: {min_trade_usd}  |  Crypto-only: assumed")
+    print("=" * 75)
+
+    results = []
+    all_tokens: dict[str, set[str]] = defaultdict(set)
 
     for addr in wallets:
-        print(f"\n{'─' * 70}")
-        print(f"Wallet: {addr[:10]}...{addr[-6:]}")
-        print("─" * 70)
         try:
-            r = analyze_wallet(addr)
-            if not r:
-                print("  (invalid address, skipped)")
-                continue
-            print(f"  Trades: {r['n_trades']} total ({r['n_buys']} buys, {r['n_sells']} sells)")
-            print(f"  Positions: {r['n_positions']}")
-            print(f"  Avg buy size: ${r['avg_buy_usd']:.2f}  |  Avg sell: ${r['avg_sell_usd']:.2f}")
-            print(f"  Categories: {r['categories']}")
-            print(f"  Time horizons: {r['horizons']}")
-            print(f"  Position mix: {r['positions_by_cat']}")
-
-            # Strategy inference
-            hints = []
-            if r["categories"].get("btc_shortterm", 0) > 5:
-                hints.append("→ BTC 5/15-min scalper (terminal_convergence style)")
-            if r["categories"].get("btc", 0) > 3 and "longterm" in r["horizons"]:
-                hints.append("→ BTC threshold / combo-arb style")
-            if r["categories"].get("politics", 0) > 3:
-                hints.append("→ Politics / event-driven")
-            if r["categories"].get("crypto", 0) > 5 and r["categories"].get("btc_shortterm", 0) < 3:
-                hints.append("→ Broader crypto (ETH, SOL, etc.)")
-            if r["avg_buy_usd"] > 50:
-                hints.append("→ Larger size (conviction)")
-            if r["avg_buy_usd"] < 15 and r["n_trades"] > 20:
-                hints.append("→ Small frequent trades (scalper)")
-            if hints:
-                print("  Inferred strategy:")
-                for h in hints:
-                    print(f"    {h}")
-
-            samples = [s for s in r.get("sample_titles", []) if s][:5]
-            if samples:
-                print("  Sample markets:")
-                for s in samples:
-                    print(f"    • {s[:60]}{'...' if len(s) > 60 else ''}")
-
+            r = analyze_wallet(addr, min_trade_usd)
+            results.append(r)
+            for tok in r["tokens_bought"]:
+                all_tokens[tok].add(addr[:10] + "..")
         except Exception as e:
-            print(f"  Error: {e}")
+            print(f"\n  Error {addr[:12]}...: {e}")
+            results.append({"addr": addr, "error": str(e)})
 
-    print("\n" + "=" * 70)
+    # Per-wallet summary
+    print("\n📊 PER-WALLET SUMMARY")
+    print("-" * 75)
+    for r in results:
+        if "error" in r:
+            print(f"  {r['addr'][:12]}...  ERROR: {r['error']}")
+            continue
+        short = f"{r['addr'][:8]}..{r['addr'][-6:]}"
+        sell_pct = r["sell_ratio"] * 100
+        m = r.get("metrics") or {}
+        days_inactive = m.get("days_since_last_trade", 999)
+        trades_day = m.get("trades_per_day", 0)
+
+        mm = r.get("mm_like", False)
+        vf = r.get("volume_farmer_like", False)
+        avoid = "❌ AVOID" if (mm or vf) else ("✅" if r["copyable_buys"] > 0 and r["crypto_pct"] >= 50 else "⚠️")
+        print(f"\n  {avoid} {short}")
+        if mm:
+            print(f"     ⛔ MM/Spread-like — balanced buys/sells, high frequency")
+        if vf:
+            print(f"     ⛔ Volume-farmer-like — high trades, small size, many tokens")
+        print(f"     Trades: {r['n_trades']} (BUY {r['n_buys']} / SELL {r['n_sells']})")
+        print(f"     Sell rate: {sell_pct:.1f}%  |  Crypto: {r['crypto_pct']:.0f}%")
+        print(f"     Copyable crypto BUYs (≥${min_trade_usd}): {r['copyable_buys']} ({r['copyable_pct']:.0f}% of crypto)")
+        print(f"     Avg BUY: ${r['avg_buy_usd']:.2f}  |  Below min: {r.get('below_min_usd', 0)}")
+        print(f"     Trades/day: {trades_day:.1f}  |  Days since last: {days_inactive:.1f}")
+
+    # Overlap: tokens traded by multiple wallets
+    overlap = {k: v for k, v in all_tokens.items() if len(v) > 1}
+    print("\n\n📈 TOKEN OVERLAP (same token traded by multiple wallets)")
+    print("-" * 75)
+    if overlap:
+        by_count = sorted(overlap.items(), key=lambda x: -len(x[1]))
+        print(f"  {len(overlap)} tokens traded by 2+ wallets (risk: conflicting SELL signals)")
+        for tok, wallets_set in by_count[:15]:
+            print(f"    {tok[:20]}...  ← {len(wallets_set)} wallets: {', '.join(sorted(wallets_set))}")
+    else:
+        print("  No overlap — wallets trade different tokens.")
+
+    # Feasibility
+    print("\n\n🔧 FEASIBILITY: RUNNING ALL 5 TOGETHER")
+    print("-" * 75)
+    avoid = [r for r in results if "error" not in r and (r.get("mm_like") or r.get("volume_farmer_like"))]
+    ok = [r for r in results if "error" not in r and r.get("copyable_buys", 0) > 0 and not r.get("mm_like") and not r.get("volume_farmer_like")]
+    crypto_ok = [r for r in ok if r.get("crypto_pct", 0) >= 50]
+    active = [r for r in ok if (r.get("metrics") or {}).get("days_since_last_trade", 999) < 7]
+
+    if avoid:
+        print(f"  ⛔ MM/Volume-farmer (avoid): {len(avoid)}")
+    print(f"  Copyable (crypto BUY ≥${min_trade_usd}, not MM/vf): {len(ok)}/{len(wallets)}")
+    print(f"  Crypto-heavy (≥50%): {len(crypto_ok)}/{len(wallets)}")
+    print(f"  Active (trade in last 7d): {len(active)}/{len(wallets)}")
+    print(f"  Token overlap: {len(overlap)} tokens (conflicting exits possible)")
+    print()
+    print("  API: 5 wallets × min_wallet_poll_seconds=2 → ~10s per full cycle (fine)")
+    print("  Risk: When A sells but B holds same token → we exit full position (by design)")
+    print()
+    if len(crypto_ok) >= 4 and len(active) >= 3:
+        print("  ✅ FEASIBLE — most wallets copyable, crypto-focused, active")
+    elif len(ok) >= 3:
+        print("  ⚠️ PARTIAL — some wallets may not copy much (low crypto or inactive)")
+    else:
+        print("  ❌ RISKY — few copyable wallets; consider fewer or different wallets")
+
+    print("\n" + "=" * 75)
 
 
 if __name__ == "__main__":

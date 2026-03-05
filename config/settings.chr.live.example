@@ -68,7 +68,7 @@ BALANCE_STALE_MAX_SECONDS=240
 ENABLE_STRATEGY_ANALYTICS=true
 
 # =============================================================================
-# STRATEGIES — spread + orderbook imbalance only
+# STRATEGIES
 # =============================================================================
 DISABLED_STRATEGIES=arbitrage,favorite_longshot,cross_platform_arbitrage,cross_asset,stink_bid,late_money,vpin,sentiment,terminal_convergence,wallet_copy,combinatorial_arb
 ENABLE_BTC_5MIN=true
@@ -103,3 +103,23 @@ VOL_LOW_SPREAD_MULT=0.7
 # TELEGRAM_BOT_TOKEN=
 # TELEGRAM_CHAT_ID=
 TELEGRAM_ALERTS_ENABLED=true
+
+# =============================================================================
+# WALLET COPY (when enabled)
+# =============================================================================
+# TRACKED_WALLETS=0x...,0x...,0x...
+# WALLET_COPY_USE_LEADERBOARD=false
+
+# Wallet rotation (auto-replace inactive tracked wallets)
+# WALLET_ROTATION_ENABLED=false
+# WALLET_ROTATION_REFRESH_INTERVAL_SECONDS=600
+# WALLET_ROTATION_INACTIVITY_THRESHOLD_HOURS=48
+# WALLET_ROTATION_MAX_REPLACEMENTS_PER_CYCLE=2
+# WALLET_ROTATION_MIN_TRACKED_WALLETS=1
+# WALLET_ROTATION_CANDIDATE_POOL_SIZE=30
+# WALLET_ROTATION_MIN_TRADES=20
+# WALLET_ROTATION_MIN_CRYPTO_PCT=70
+# WALLET_ROTATION_MIN_SHORTTERM_PCT=40
+# WALLET_ROTATION_MAX_DAYS_SINCE_LAST_TRADE=7
+# WALLET_ROTATION_MIN_TRADES_PER_DAY=0.5
+# WALLET_ROTATION_REMOVED_COOLDOWN_HOURS=24

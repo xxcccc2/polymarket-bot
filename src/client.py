@@ -195,11 +195,9 @@ class PolymarketClient:
         def _loop():
             while self._heartbeat_running and self.is_connected and self.client:
                 try:
-                    post_heartbeat = getattr(self.client, "post_heartbeat", None)
-                    if callable(post_heartbeat):
-                        self._retry_call(post_heartbeat, "Post heartbeat")
-                    else:
-                        self._retry_call(self._post_heartbeat_fallback, "Post heartbeat")
+                    # SDK post_heartbeat uses /v1/heartbeats with heartbeat_id; API returns
+                    # "Invalid Heartbeat ID". Use our fallback: POST /heartbeats with empty body.
+                    self._retry_call(self._post_heartbeat_fallback, "Post heartbeat")
                 except Exception as exc:
                     msg = str(exc)
                     if self._is_auth_error(msg):
@@ -220,17 +218,24 @@ class PolymarketClient:
 
     def _post_heartbeat_fallback(self) -> Dict[str, Any]:
         """
-        Fallback heartbeat call for SDK versions missing post_heartbeat().
-        Tries both /heartbeats and /heartbeat paths for compatibility.
+        POST heartbeat with empty body. SDK's post_heartbeat uses /v1/heartbeats with
+        heartbeat_id which API rejects ("Invalid Heartbeat ID"). Polymarket docs show
+        POST /heartbeats with no body required.
         """
         self.client.assert_level_2_auth()
         body: Dict[str, Any] = {}
+        serialized = json.dumps(body, separators=(",", ":"), ensure_ascii=False)
         errors = []
-        for path in ("/heartbeats", "/heartbeat"):
+        for path in ("/heartbeats", "/v1/heartbeats"):
             try:
-                request_args = RequestArgs(method="POST", request_path=path, body=body)
+                request_args = RequestArgs(
+                    method="POST",
+                    request_path=path,
+                    body=body,
+                    serialized_body=serialized,
+                )
                 headers = create_level_2_headers(self.client.signer, self.client.creds, request_args)
-                return clob_post(f"{self.client.host}{path}", headers=headers, data=body)
+                return clob_post(f"{self.client.host}{path}", headers=headers, data=serialized)
             except Exception as exc:
                 errors.append(str(exc))
                 continue

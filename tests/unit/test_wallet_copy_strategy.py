@@ -174,7 +174,7 @@ def test_end_to_end_buy_fill_then_mirrored_sell_signal(monkeypatch):
     monkeypatch.setattr(wallet_copy_module, "get_trades_by_user", fake_get_trades_by_user)
 
     rm = SimpleNamespace(
-        positions={"token-1": SimpleNamespace(size=5, side="YES", market_slug="btc-2025")}
+        positions={"token-1": SimpleNamespace(size=5, side="YES", market_slug="btc-2025", avg_price=0.52)}
     )
     strategy = WalletCopyStrategy(
         {
@@ -193,12 +193,11 @@ def test_end_to_end_buy_fill_then_mirrored_sell_signal(monkeypatch):
     assert buy_signals[0].signal_type == SignalType.BUY
 
     strategy.execute(buy_signals, order_manager)
-    # Provenance is fill-based, so no copied mapping before fill.
-    assert "token-1" not in strategy.copied_from
+    # Provenance is recorded on signal (for SELL mirroring even if fill lags)
+    assert strategy.copied_from["token-1"] == {"0xleader"}
 
     buy_metadata = order_manager.placed[0]["metadata"]
     order_manager.emit_fill("BUY", "token-1", buy_metadata)
-    assert strategy.copied_from["token-1"] == {"0xleader"}
 
     phase["mode"] = "sell"
     sell_signals = strategy.analyze([market])
@@ -270,7 +269,7 @@ def test_multi_leader_same_token_sell_is_selective(monkeypatch):
     monkeypatch.setattr(wallet_copy_module, "get_trades_by_user", fake_get_trades_by_user)
 
     rm = SimpleNamespace(
-        positions={"token-1": SimpleNamespace(size=6, side="YES", market_slug="btc-2025")}
+        positions={"token-1": SimpleNamespace(size=6, side="YES", market_slug="btc-2025", avg_price=0.50)}
     )
     strategy = WalletCopyStrategy(
         {
@@ -302,3 +301,87 @@ def test_multi_leader_same_token_sell_is_selective(monkeypatch):
     strategy.execute(sell_signals[:1], order_manager)
     order_manager.emit_fill("SELL", "token-1", sell_signals[0].metadata)
     assert strategy.copied_from["token-1"] == {"0xleader2"}
+
+
+def test_signals_per_wallet_in_get_state_with_rotation(monkeypatch):
+    """Per-wallet signal counts appear in TUI status; rotation shows only current wallets."""
+    now = int(time.time())
+    wallet_trades = {
+        "0x8E9cD5eC7a26d602b63B4bC4C193fEbB83c8eD64": [
+            {
+                "transactionHash": "tx-a1",
+                "asset": "token-1",
+                "side": "BUY",
+                "size": 10,
+                "price": 0.50,
+                "timestamp": now,
+                "slug": "btc-updown-5m",
+                "userName": "trader_a",
+            },
+            {
+                "transactionHash": "tx-a2",
+                "asset": "token-2",
+                "side": "BUY",
+                "size": 8,
+                "price": 0.60,
+                "timestamp": now + 1,
+                "slug": "eth-updown-5m",
+                "userName": "trader_a",
+            },
+        ],
+        "0x1d0034134e339a309700ff2d34e99fa2d48b0313": [
+            {
+                "transactionHash": "tx-b1",
+                "asset": "token-3",
+                "side": "BUY",
+                "size": 12,
+                "price": 0.55,
+                "timestamp": now,
+                "slug": "sol-updown-5m",
+                "userName": "trader_b",
+            },
+        ],
+    }
+
+    def fake_get_trades_by_user(user, limit=20, taker_only=True):  # noqa: ARG001
+        return wallet_trades.get(user, [])
+
+    monkeypatch.setattr(wallet_copy_module, "get_trades_by_user", fake_get_trades_by_user)
+
+    strategy = WalletCopyStrategy(
+        {
+            "use_leaderboard": False,
+            "tracked_wallets": [
+                "0x8E9cD5eC7a26d602b63B4bC4C193fEbB83c8eD64",
+                "0x1d0034134e339a309700ff2d34e99fa2d48b0313",
+            ],
+            "risk_manager": SimpleNamespace(positions={}),
+            "min_tracked_trade_usd": 1,
+            "cooldown_seconds": 0,
+            "min_wallet_poll_seconds": 0,
+        }
+    )
+    markets = [
+        _make_market("token-1"),
+        _make_market("token-2"),
+        _make_market("token-3"),
+    ]
+
+    strategy.analyze(markets)
+    state = strategy.get_state()
+
+    # Both wallets produced signals; status should show per-wallet counts
+    assert "8E9cD5: 2" in state["status"]  # wallet A: 2 signals
+    assert "1d0034: 1" in state["status"]  # wallet B: 1 signal
+
+    # Simulate rotation: replace first wallet with new one
+    strategy.tracked_wallets = [
+        "0xNEW1234567890abcdef1234567890abcdef12",  # rotated in
+        "0x1d0034134e339a309700ff2d34e99fa2d48b0313",  # kept
+    ]
+    state_after_rotation = strategy.get_state()
+
+    # Should show NEW wallet (0 signals) and kept wallet (1 signal); rotated-out wallet not shown
+    assert "NEW123: 0" in state_after_rotation["status"]
+    assert "1d0034: 1" in state_after_rotation["status"]
+    assert "8E9cD5" not in state_after_rotation["status"]

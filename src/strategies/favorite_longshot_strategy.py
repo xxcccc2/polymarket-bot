@@ -45,6 +45,7 @@ class FavoriteLongshotStrategy(BaseStrategy):
         - order_size_usd: USD per trade (default: from config)
         - trade_favorites: Enable buying favorites (default: True)
         - trade_longshots: Enable fading longshots (default: True)
+        - log_longshots: Log each longshot found (default: False, reduces spam)
         - max_positions: Maximum concurrent positions (default: 20)
     """
     
@@ -71,6 +72,7 @@ class FavoriteLongshotStrategy(BaseStrategy):
         self.trade_favorites = self.config.get("trade_favorites", True)
         self.trade_longshots = self.config.get("trade_longshots", True)
         self.max_positions = self.config.get("max_positions", 20)
+        self.log_longshots = self.config.get("log_longshots", False)  # Longshots aren't traded, so keep quiet by default
         
         # Track positions
         self.positions: Dict[str, Dict] = {}  # token_id -> position info
@@ -197,22 +199,17 @@ class FavoriteLongshotStrategy(BaseStrategy):
                 # In paper trading, we'll generate a "SELL" signal representing
                 # the opportunity to fade these
                 expected_edge = self._calculate_expected_edge(price, False)
-                
-                # For now, just log the opportunity (selling short requires collateral)
                 longshots_found += 1
                 
-                cprint(
-                    f"⚠️  LONGSHOT (overpriced): {data.market_slug[:40]}... @ {price*100:.1f}¢ | "
-                    f"Avoid/Fade - {expected_edge*100:.1f}% edge",
-                    "yellow"
-                )
-                
-                # Optionally generate a tracking signal
-                # In real trading, you'd sell these if you held them
-                # or place limit orders to sell to others
+                if self.log_longshots:
+                    cprint(
+                        f"⚠️  LONGSHOT (overpriced): {data.market_slug[:40]}... @ {price*100:.1f}¢ | "
+                        f"Avoid/Fade - {expected_edge*100:.1f}% edge",
+                        "yellow"
+                    )
         
-        # Summary
-        if favorites_found > 0 or longshots_found > 0:
+        # Summary: only log when we have actionable favorites (avoids spam from longshot-only cycles)
+        if favorites_found > 0:
             cprint(
                 f"   📊 Found {favorites_found} favorites to buy, {longshots_found} longshots to avoid",
                 "cyan"

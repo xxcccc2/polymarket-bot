@@ -56,6 +56,9 @@ def configure_logging(level: Optional[str] = None) -> None:
         datefmt="%H:%M:%S",
         stream=sys.stdout,
     )
+    # Suppress noisy HTTP request logs from httpx (py-clob-client)
+    for _logger in ("httpx", "httpcore"):
+        logging.getLogger(_logger).setLevel(logging.WARNING)
     _CONFIGURED = True
 
 

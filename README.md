@@ -15,6 +15,7 @@ An institutional-grade algorithmic trading platform for Polymarket prediction ma
 - **Paper Trading** — full simulation mode, zero risk
 - **Order Lifecycle** — tracking, duplicate prevention, stale cleanup, graceful shutdown cancellation
 - **Wallet Analysis** — reverse-engineer tracked wallets to infer strategies (markets, sizing, horizons)
+- **Backtesting** — PolyBackTest API integration for historical 5m/15m Up/Down markets; replay strategies like terminal_convergence
 
 ## Quick Start
 
@@ -58,6 +59,7 @@ Edit `.env` with your credentials:
 | `POLYMARKET_PROXY_ADDRESS` | Yes | Polymarket proxy wallet (found on profile page) |
 | `BINANCE_API_KEY` | No | For cross-asset BTC strategies |
 | `BINANCE_SECRET_KEY` | No | For cross-asset BTC strategies |
+| `POLYBACKTEST_API_KEY` | No | For backtesting (see [Backtesting](docs/backtesting/README.md)) |
 | `TELEGRAM_BOT_TOKEN` | No | For push notifications (see Telegram Setup) |
 | `TELEGRAM_CHAT_ID` | No | Your Telegram chat ID |
 
@@ -205,6 +207,7 @@ Copy trades from top Polymarket traders:
 - Polls their trades via Data API, copies new BUYs with configurable size
 - Filters: crypto-only, min trade size, max copy delay, per-wallet poll throttle
 - `TRACKED_WALLETS` format: comma-separated addresses (`0xabc...,0xdef...`)
+- **Wallet rotation** (optional): auto-replaces inactive tracked wallets with scored leaderboard candidates; persists to DB across restarts. See [Wallet Copy docs](docs/strategies/wallet-copy/README.md).
 - Run: `./venv/bin/python -m src.bot --strategy wallet_copy`
 
 **Analyze wallets before copying** — use the analysis script to infer a wallet's strategy (BTC vs multi-crypto, 5m vs 15m, avg size, etc.):
@@ -252,6 +255,21 @@ Exploit logical pricing violations across related markets:
 - Groups by asset + direction, checks monotonicity constraints
 - P(BTC > $100k) must be ≤ P(BTC > $90k) — violations = free money
 - $40M+ extracted from Polymarket via this edge (Milionis et al. 2024)
+
+### Backtesting
+
+Download historical Polymarket Up/Down data and backtest strategies (e.g. terminal_convergence):
+
+```bash
+# 1. Add POLYBACKTEST_API_KEY to .env (get key at polybacktest.com)
+# 2. Download data (free plan: 50×5m, 50×15m, 24×1h, 24×4h, 5×24h markets)
+./venv/bin/python -m scripts.download_polybacktest --types 5m,15m
+
+# 3. Run backtest
+./venv/bin/python -m scripts.run_backtest --strategy terminal_convergence --market-type 5m
+```
+
+See [docs/backtesting/](docs/backtesting/) for full documentation.
 
 ### Strategy Modes
 
@@ -352,7 +370,9 @@ When enabled, all risk limits scale dynamically with your balance:
 polymarket-bot/
 ├── scripts/
 │   ├── analyze_wallets.py        # Reverse-engineer wallets to infer strategies
-│   └── build_native.sh           # Build bs-p libpmkernel and install to lib/
+│   ├── build_native.sh           # Build bs-p libpmkernel and install to lib/
+│   ├── download_polybacktest.py # Download PolyBackTest data for backtesting
+│   └── run_backtest.py          # Run backtest on downloaded data
 ├── lib/                          # Compiled native library (gitignored)
 │   └── libpmkernel.dylib         # macOS — or .so on Linux
 ├── src/
@@ -372,6 +392,13 @@ polymarket-bot/
 │   │   └── binance_ws.py         # Binance BTC/USDT real-time feed
 │   ├── sizing/
 │   │   └── kelly.py              # Inventory-aware Kelly sizing (bs-p enhanced)
+│   ├── backtest/                 # PolyBackTest backtesting module
+│   │   ├── polybacktest_client.py
+│   │   ├── downloader.py
+│   │   ├── store.py
+│   │   ├── replay_feed.py
+│   │   ├── mappers.py
+│   │   └── engine.py
 │   ├── analytics/
 │   │   └── strategy_tracker.py   # Per-strategy P&L, Sharpe, health
 │   ├── alerts/
@@ -469,7 +496,8 @@ python -m src.bot --strategy my_strategy
 - [Polymarket WebSocket](https://docs.polymarket.com/developers/CLOB/websocket)
 - [Binance WebSocket](https://developers.binance.com/docs/binance-spot-api-docs/web-socket-streams)
 - [Telegram Bot API](https://core.telegram.org/bots/api)
-- [bs-p native engine](docs/bs-p/deployment-guide.md) — Avellaneda-Stoikov quoting, Kelly sizing, portfolio Greeks
+- [bs-p native engine](docs/engines/bs-p/deployment-guide.md) — Avellaneda-Stoikov quoting, Kelly sizing, portfolio Greeks
+- [Backtesting](docs/backtesting/README.md) — PolyBackTest API, data download, strategy replay
 
 ## License
 

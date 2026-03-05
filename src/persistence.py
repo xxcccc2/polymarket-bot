@@ -84,6 +84,17 @@ class SqliteStore:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_orders_token ON orders(token_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_token ON trades(token_id)")
 
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS wallet_copy_state (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    tracked_wallets_json TEXT NOT NULL,
+                    removed_at_json TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+
     def save_order(self, record: Dict[str, Any]) -> None:
         metadata = record.get("metadata") or {}
         payload = {
@@ -213,3 +224,51 @@ class SqliteStore:
                 """,
                 payload,
             )
+
+    def save_wallet_copy_state(
+        self,
+        tracked_wallets: List[str],
+        removed_at: Dict[str, float],
+    ) -> None:
+        """Persist wallet_copy tracked wallets and rotation cooldown (removed_at)."""
+        from datetime import datetime
+        payload = {
+            "tracked_wallets_json": json.dumps(tracked_wallets),
+            "removed_at_json": json.dumps(removed_at),
+            "updated_at": datetime.utcnow().isoformat() + "Z",
+        }
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO wallet_copy_state (id, tracked_wallets_json, removed_at_json, updated_at)
+                VALUES (1, :tracked_wallets_json, :removed_at_json, :updated_at)
+                ON CONFLICT(id) DO UPDATE SET
+                    tracked_wallets_json = excluded.tracked_wallets_json,
+                    removed_at_json = excluded.removed_at_json,
+                    updated_at = excluded.updated_at
+                """,
+                payload,
+            )
+
+    def load_wallet_copy_state(
+        self,
+    ) -> Optional[tuple[List[str], Dict[str, float]]]:
+        """
+        Load persisted wallet_copy state.
+
+        Returns:
+            (tracked_wallets, removed_at) or None if no persisted state.
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT tracked_wallets_json, removed_at_json FROM wallet_copy_state WHERE id = 1"
+            ).fetchone()
+        if not row:
+            return None
+        try:
+            tracked = json.loads(row["tracked_wallets_json"] or "[]")
+            removed = json.loads(row["removed_at_json"] or "{}")
+            removed = {k: float(v) for k, v in removed.items()}
+            return (list(tracked), removed)
+        except (json.JSONDecodeError, TypeError):
+            return None

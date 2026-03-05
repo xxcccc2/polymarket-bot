@@ -42,26 +42,17 @@ from ..config import (
     TRADING_FEE_RATE,
     COMBO_EDGE_SIZE_FACTOR,
     COMBO_EDGE_SIZE_CAP,
+    COMBO_MIN_EDGE_CENTS,
+    COMBO_COOLDOWN,
 )
 
 
-# ----- Configuration Defaults -----
-
-# Minimum mispricing to act on (after fees)
-COMBO_MIN_EDGE_CENTS = 3  # 3 cents minimum edge
-
-# Cooldown per market pair (seconds)
-COMBO_COOLDOWN = 300
-
-# Scale size by edge (Kroer et al. 2016: profit ∝ distance to coherence)
-# multiplier = 1 + edge_cents/100 * factor, capped at COMBO_EDGE_SIZE_CAP
-COMBO_EDGE_SIZE_FACTOR = 0.5
-COMBO_EDGE_SIZE_CAP = 2.0
+# ----- Configuration Defaults (fallback values only) -----
 
 # Minimum confidence
 COMBO_MIN_CONFIDENCE = 0.60
 
-# Maximum buy price
+# Maximum/minimum buy price bounds
 COMBO_MAX_BUY_PRICE = 0.92
 COMBO_MIN_BUY_PRICE = 0.03
 
