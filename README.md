@@ -10,7 +10,7 @@
 
 ---
 
-An institutional-grade algorithmic trading platform for Polymarket prediction markets, powered by the [bs-p](https://github.com/lubluniky/bs-p) native math engine for marketmaking and kelly sizing.
+An institutional-grade algorithmic trading platform for Polymarket prediction markets, powered by the [bs-p](https://github.com/lubluniky/bs-p) native math engine for dynamic sizing, greeks and risk.
 
 ## Features
 
