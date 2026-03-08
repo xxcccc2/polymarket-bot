@@ -118,6 +118,25 @@ TERMINAL_CONVERGENCE_WINDOW_SECONDS=120
 TERMINAL_MIN_EDGE_CENTS=1
 
 # =============================================================================
+# ML DIRECTIONAL EDGE
+# Keep these knobs in the shared profile file so the strategy can be promoted
+# from paper to live without editing `.env`. Start disabled until an artifact
+# has been trained and validated.
+# =============================================================================
+ML_DIRECTIONAL_ENABLED=false
+ML_DIRECTIONAL_MODEL_PATH=./data/ml/artifacts/ml_directional_latest.pkl
+ML_DIRECTIONAL_ENABLED_HORIZONS=15m,1h
+ML_DIRECTIONAL_MIN_PROBABILITY=0.53
+ML_DIRECTIONAL_MIN_EDGE=0.03
+ML_DIRECTIONAL_MAKER_OFFSET=0.005
+ML_DIRECTIONAL_SIGNAL_COOLDOWN_SECONDS=45
+ML_DIRECTIONAL_ROLLING_ACCURACY_WINDOW=100
+ML_DIRECTIONAL_MIN_ROLLING_ACCURACY=0.51
+ML_DIRECTIONAL_BRIER_WINDOW=50
+ML_DIRECTIONAL_MAX_ROLLING_BRIER=0.26
+ML_BINANCE_COLLECTOR_DB=./data/ml/collectors/binance_microstructure.sqlite
+
+# =============================================================================
 # COMBINATORIAL ARB
 # =============================================================================
 COMBO_MIN_EDGE_CENTS=3
@@ -126,6 +145,7 @@ COMBO_COOLDOWN=300
 # =============================================================================
 # WALLET COPY
 # =============================================================================
+# 0x1979ae6b7e6534de9c4539d0c205e582ca637c9d,0x1d0034134e339a309700ff2d34e99fa2d48b0313,0x1461cc6e1a05e20710c416307db62c28f1d122d8
 # 0x8E9cD5eC7a26d602b63B4bC4C193fEbB83c8eD64,0x70ec235a31eb35f243e2618d6ea3b5b8962bbb5d
 TRACKED_WALLETS=0x4c353dd347c2e7d8bcdc5cd6ee569de7baf23e2f,0x1d0034134e339a309700ff2d34e99fa2d48b0313,0x6bab41a0dc40d6dd4c1a915b8c01969479fd1292,0x751a2b86cab503496efd325c8344e10159349ea1,0x9e8283a004204504e52c67f4f387dfb03ba4a28b,0xd84c2b6d65dc596f49c7b6aadd6d74ca91e407b9,0x000d257d2dc7616feaef4ae0f14600fdf50a758e
 WALLET_COPY_USE_LEADERBOARD=false

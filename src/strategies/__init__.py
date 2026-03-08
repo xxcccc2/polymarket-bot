@@ -42,6 +42,7 @@ from .vpin_strategy import VPINStrategy
 from .sentiment_strategy import SentimentStrategy
 from .combinatorial_arb_strategy import CombinatorialArbStrategy
 from .wallet_copy_strategy import WalletCopyStrategy
+from .ml_directional_strategy import MLDirectionalStrategy
 
 # Registry of available strategies
 AVAILABLE_STRATEGIES = {
@@ -58,6 +59,7 @@ AVAILABLE_STRATEGIES = {
     "sentiment": SentimentStrategy,
     "combinatorial_arb": CombinatorialArbStrategy,
     "wallet_copy": WalletCopyStrategy,
+    "ml_directional": MLDirectionalStrategy,
 }
 
 

@@ -6,6 +6,15 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 
+
+def _getenv_nonempty(name: str, default: str) -> str:
+    """Return env value unless it is unset or blank."""
+    value = os.getenv(name)
+    if value is None:
+        return default
+    value = value.strip()
+    return value if value else default
+
 # Load environment variables in two layers:
 # 1) Optional shared non-secret config file (for collaboration/agents)
 # 2) Private .env secrets file (overrides shared values)
@@ -60,11 +69,12 @@ POLYBACKTEST_BASE_URL = os.getenv("POLYBACKTEST_BASE_URL", "https://api.polyback
 # =============================================================================
 BINANCE_API_KEY = os.getenv("BINANCE_API_KEY", "")
 BINANCE_SECRET_KEY = os.getenv("BINANCE_SECRET_KEY", "")
-BINANCE_WS_URL = os.getenv("BINANCE_WS_URL", "wss://stream.binance.com:9443/ws")
-BINANCE_WS_COMBINED_URL = os.getenv(
+BINANCE_WS_URL = _getenv_nonempty("BINANCE_WS_URL", "wss://stream.binance.com:9443/ws")
+BINANCE_WS_COMBINED_URL = _getenv_nonempty(
     "BINANCE_WS_COMBINED_URL", "wss://stream.binance.com:9443/stream"
 )
-BINANCE_REST_URL = os.getenv("BINANCE_REST_URL", "https://api.binance.com")
+BINANCE_REST_URL = _getenv_nonempty("BINANCE_REST_URL", "https://api.binance.com")
+BINANCE_FUTURES_REST_URL = _getenv_nonempty("BINANCE_FUTURES_REST_URL", "https://fapi.binance.com")
 BINANCE_SYMBOL = os.getenv("BINANCE_SYMBOL", "btcusdt")
 # Comma-separated symbols for multi-asset feed (BTC, ETH, SOL, XRP). Single symbol = legacy mode.
 BINANCE_SYMBOLS = [
@@ -451,10 +461,48 @@ MAKER_FEE_RATE = float(os.getenv("MAKER_FEE_RATE", "0"))
 MIN_PROFIT_MARGIN = float(os.getenv("MIN_PROFIT_MARGIN", "0.005"))  # 0.5%
 
 # =============================================================================
+# ML DIRECTIONAL STRATEGY
+# =============================================================================
+ML_DIRECTIONAL_ENABLED = os.getenv("ML_DIRECTIONAL_ENABLED", "true").lower() == "true"
+ML_DIRECTIONAL_ENABLED_HORIZONS = [
+    value.strip().lower()
+    for value in os.getenv("ML_DIRECTIONAL_ENABLED_HORIZONS", "15m,1h").split(",")
+    if value.strip()
+]
+ML_DIRECTIONAL_MIN_PROBABILITY = float(os.getenv("ML_DIRECTIONAL_MIN_PROBABILITY", "0.53"))
+ML_DIRECTIONAL_MIN_EDGE = float(os.getenv("ML_DIRECTIONAL_MIN_EDGE", "0.03"))
+ML_DIRECTIONAL_MAKER_OFFSET = float(os.getenv("ML_DIRECTIONAL_MAKER_OFFSET", "0.005"))
+ML_DIRECTIONAL_SIGNAL_COOLDOWN_SECONDS = int(os.getenv("ML_DIRECTIONAL_SIGNAL_COOLDOWN_SECONDS", "45"))
+ML_DIRECTIONAL_MAX_SIGNALS_PER_CYCLE = int(os.getenv("ML_DIRECTIONAL_MAX_SIGNALS_PER_CYCLE", "2"))
+ML_DIRECTIONAL_ATR_HALT_PERCENTILE = float(os.getenv("ML_DIRECTIONAL_ATR_HALT_PERCENTILE", "0.95"))
+ML_DIRECTIONAL_FEED_STALE_SECONDS = int(os.getenv("ML_DIRECTIONAL_FEED_STALE_SECONDS", "10"))
+ML_DIRECTIONAL_ROLLING_ACCURACY_WINDOW = int(os.getenv("ML_DIRECTIONAL_ROLLING_ACCURACY_WINDOW", "100"))
+ML_DIRECTIONAL_MIN_ROLLING_ACCURACY = float(os.getenv("ML_DIRECTIONAL_MIN_ROLLING_ACCURACY", "0.51"))
+ML_DIRECTIONAL_BRIER_WINDOW = int(os.getenv("ML_DIRECTIONAL_BRIER_WINDOW", "50"))
+ML_DIRECTIONAL_MAX_ROLLING_BRIER = float(os.getenv("ML_DIRECTIONAL_MAX_ROLLING_BRIER", "0.26"))
+ML_DIRECTIONAL_SOFT_LOSS_STREAK = int(os.getenv("ML_DIRECTIONAL_SOFT_LOSS_STREAK", "7"))
+ML_DIRECTIONAL_SOFT_PAUSE_SECONDS = int(os.getenv("ML_DIRECTIONAL_SOFT_PAUSE_SECONDS", str(2 * 3600)))
+ML_DIRECTIONAL_HARD_LOSS_STREAK = int(os.getenv("ML_DIRECTIONAL_HARD_LOSS_STREAK", "10"))
+ML_DIRECTIONAL_HARD_PAUSE_SECONDS = int(os.getenv("ML_DIRECTIONAL_HARD_PAUSE_SECONDS", str(24 * 3600)))
+ML_DIRECTIONAL_ONLY_CRYPTO = os.getenv("ML_DIRECTIONAL_ONLY_CRYPTO", "true").lower() == "true"
+
+# =============================================================================
 # DATA PATHS
 # =============================================================================
 DATA_DIR = PROJECT_ROOT / "data"
 LOGS_DIR = PROJECT_ROOT / "logs"
+ML_DATA_DIR = DATA_DIR / "ml"
+ML_OHLC_DIR = ML_DATA_DIR / "ohlc"
+ML_ARTIFACTS_DIR = ML_DATA_DIR / "artifacts"
+ML_COLLECTORS_DIR = ML_DATA_DIR / "collectors"
+ML_DIRECTIONAL_MODEL_PATH = Path(
+    os.getenv("ML_DIRECTIONAL_MODEL_PATH", str(ML_ARTIFACTS_DIR / "ml_directional_latest.pkl"))
+)
+ML_BINANCE_COLLECTOR_DB = Path(
+    os.getenv("ML_BINANCE_COLLECTOR_DB", str(ML_COLLECTORS_DIR / "binance_microstructure.sqlite"))
+)
+ML_COLLECTOR_DEPTH_LEVELS = int(os.getenv("ML_COLLECTOR_DEPTH_LEVELS", "20"))
+ML_COLLECTOR_REST_POLL_SECONDS = int(os.getenv("ML_COLLECTOR_REST_POLL_SECONDS", "60"))
 
 # SQLite database path for persisted bot state
 _default_db_name = (
@@ -469,6 +517,10 @@ BACKTEST_DB = Path(os.getenv("BACKTEST_DB", str(BACKTEST_DIR / "polybacktest.db"
 # Create directories if they don't exist
 DATA_DIR.mkdir(exist_ok=True)
 LOGS_DIR.mkdir(exist_ok=True)
+ML_DATA_DIR.mkdir(exist_ok=True)
+ML_OHLC_DIR.mkdir(exist_ok=True)
+ML_ARTIFACTS_DIR.mkdir(exist_ok=True)
+ML_COLLECTORS_DIR.mkdir(exist_ok=True)
 
 
 def validate_config():

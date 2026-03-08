@@ -166,6 +166,8 @@ class PolymarketBot:
         
         # BTC 5-min strategies that need Binance feed
         _BTC_5MIN_STRATEGIES = ["cross_asset", "terminal_convergence", "orderbook_imbalance"]
+        # ML strategies use Binance feed but target slower horizons, so keep them separate
+        _ML_STRATEGIES = ["ml_directional"]
         # Phase 5 advanced strategies (work on all markets)
         _ADVANCED_STRATEGIES = ["vpin", "sentiment", "combinatorial_arb", "wallet_copy"]
         # All original strategies
@@ -186,6 +188,7 @@ class PolymarketBot:
             strat_names = list(_CLASSIC_STRATEGIES)
             if ENABLE_BTC_5MIN and self.binance_feed:
                 strat_names.extend(_BTC_5MIN_STRATEGIES)
+                strat_names.extend(_ML_STRATEGIES)
             strat_names.extend(_ADVANCED_STRATEGIES)
             for name in strat_names:
                 strat = _load_strategy(name)

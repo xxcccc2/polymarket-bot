@@ -15,7 +15,7 @@ An institutional-grade algorithmic trading platform for Polymarket prediction ma
 ## Features
 
 - **bs-p Native Engine** — C math library (Avellaneda-Stoikov quoting, inventory-aware Kelly, portfolio Greeks, shock testing) loaded via ctypes with automatic pure-Python fallback
-- **12 Trading Strategies** — from wallet-copy to cross-asset latency arb
+- **13 Trading Strategies** — from wallet-copy to ML-driven directional edge
 - **Binance BTC Feed** — real-time VWAP, volatility, and price velocity for 5-min BTC markets
 - **Adaptive Risk Manager** — bankroll-proportional limits, drawdown throttling, portfolio Greeks monitoring, pre-trade shock testing, auto-halt
 - **Multi-Wallet Profiles** — run CHR/BB/etc. concurrently from one shared config file
@@ -26,6 +26,7 @@ An institutional-grade algorithmic trading platform for Polymarket prediction ma
 - **Order Lifecycle** — tracking, duplicate prevention, stale cleanup, graceful shutdown cancellation
 - **Wallet Analysis** — reverse-engineer tracked wallets to infer strategies (markets, sizing, horizons)
 - **Backtesting** — PolyBackTest API integration for historical 5m/15m Up/Down markets; replay strategies like terminal_convergence
+- **Offline ML Pipeline** — `src/ml/` package for OHLCV loading, feature engineering, walk-forward training, artifact export, and dedicated replay backtests
 
 ## Quick Start
 
@@ -89,6 +90,9 @@ Optional (recommended for multi-wallet):
 
 # Run specific strategy
 ./venv/bin/python -m src.bot --strategy cross_asset
+
+# Run the ML directional strategy (requires a trained artifact)
+./venv/bin/python -m src.bot --strategy ml_directional
 
 # Run all non-disabled strategies
 ./venv/bin/python -m src.bot --strategy all
@@ -172,6 +176,25 @@ Related controls:
 | `DISABLED_STRATEGIES` | `spread,arbitrage,favorite_longshot,cross_platform_arbitrage` | Comma-separated disabled list |
 | `ADAPTIVE_RISK_ENABLED` | `true` | Bankroll-proportional risk limits |
 
+### ML Directional
+
+The `ml_directional` strategy is split into:
+
+- **Offline research/training** — `src/ml/data_loader.py`, `src/ml/features.py`, `src/ml/train.py`, `src/ml/backtest.py`
+- **Live execution** — `src/strategies/ml_directional_strategy.py`
+
+Key settings:
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `ML_DIRECTIONAL_MODEL_PATH` | `data/ml/artifacts/ml_directional_latest.pkl` | Model artifact loaded by the live strategy |
+| `ML_DIRECTIONAL_ENABLED_HORIZONS` | `15m,1h` | Supported Polymarket horizons for live trading |
+| `ML_DIRECTIONAL_MIN_PROBABILITY` | `0.53` | Minimum model confidence before a trade is considered |
+| `ML_DIRECTIONAL_MIN_EDGE` | `0.03` | Minimum model-vs-market edge after friction buffer |
+| `ML_DIRECTIONAL_MAKER_OFFSET` | `0.005` | Resting bid improvement for maker-first execution |
+
+See [ML Directional Edge docs](docs/strategies/ml-directional-edge/README.md) for the training/backtest workflow.
+
 ## Strategies
 
 ### Active Strategies
@@ -236,7 +259,16 @@ unset http_proxy https_proxy; python scripts/analyze_wallets.py
 TRACKED_WALLETS=0xabc...,0xdef... python scripts/reverse_engineer_wallets.py
 ```
 
-#### 6. Late Money ✅ `late_money`
+#### 6. ML Directional Edge ✅ `ml_directional`
+Model-driven directional trading for 15m and 1h BTC Up/Down markets:
+- Offline pipeline in `src/ml/` loads OHLCV data, engineers features, trains LightGBM models, and exports artifacts
+- Dedicated replay harness applies maker-aware friction assumptions before live deployment
+- Live strategy loads the artifact, builds runtime features from Binance + Polymarket state, and emits maker-first signals
+- Includes rolling accuracy/Brier monitoring, feed staleness halts, and loss-streak pauses
+- Docs: [ML Directional Edge](docs/strategies/ml-directional-edge/README.md)
+- Checklist: [Implementation Checklist](docs/strategies/ml-directional-edge/IMPLEMENTATION_CHECKLIST.md)
+
+#### 7. Late Money ✅ `late_money`
 Follow informed traders near expiration:
 - Tracks price velocity in final hours
 - 40% of volume occurs in last minute (more informed)
