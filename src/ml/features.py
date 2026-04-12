@@ -72,6 +72,10 @@ class FeatureBuilder:
 
     atr_window: int = 14
     momentum_windows: tuple[int, ...] = (1, 3, 6)
+    moving_average_windows: tuple[int, ...] = (5, 10, 20)
+    breakout_window: int = 20
+    volume_window: int = 20
+    rsi_window: int = 14
 
     def build_training_schema_runtime_row(
         self,
@@ -223,6 +227,25 @@ class FeatureBuilder:
         for window in self.momentum_windows:
             result[f"momentum_{window}"] = result["close"].pct_change(window)
             result[f"volatility_{window}"] = result["return_1"].rolling(window).std()
+        for window in self.moving_average_windows:
+            sma = result["close"].rolling(window).mean()
+            ema = result["close"].ewm(span=window, adjust=False).mean()
+            result[f"sma_dist_{window}"] = (result["close"] / sma) - 1.0
+            result[f"ema_dist_{window}"] = (result["close"] / ema) - 1.0
+            result[f"sma_slope_{window}"] = sma.pct_change(3)
+            result[f"ema_slope_{window}"] = ema.pct_change(3)
+
+        ema_fast = result["close"].ewm(span=10, adjust=False).mean()
+        ema_slow = result["close"].ewm(span=20, adjust=False).mean()
+        result["ema_gap_10_20"] = (ema_fast / ema_slow) - 1.0
+        result["rsi_14"] = _relative_strength_index(result["close"], self.rsi_window)
+        rolling_high = result["high"].rolling(self.breakout_window).max()
+        rolling_low = result["low"].rolling(self.breakout_window).min()
+        result["breakout_high_20"] = (result["close"] / rolling_high) - 1.0
+        result["breakout_low_20"] = (result["close"] / rolling_low) - 1.0
+        volume_mean = result["volume"].rolling(self.volume_window).mean()
+        volume_std = result["volume"].rolling(self.volume_window).std()
+        result["volume_z_20"] = (result["volume"] - volume_mean) / volume_std.replace(0, np.nan)
 
         rename_map = {
             col: f"{prefix}_{col}"
@@ -244,6 +267,17 @@ def _average_true_range(frame: pd.DataFrame, window: int) -> pd.Series:
     )
     true_range = tr_components.max(axis=1)
     return true_range.rolling(window).mean()
+
+
+def _relative_strength_index(series: pd.Series, window: int) -> pd.Series:
+    delta = series.diff()
+    gains = delta.clip(lower=0.0)
+    losses = -delta.clip(upper=0.0)
+    avg_gain = gains.rolling(window).mean()
+    avg_loss = losses.rolling(window).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100.0 - (100.0 / (1.0 + rs))
+    return rsi / 100.0
 
 
 def _sum_orderbook_levels(levels: List) -> float:

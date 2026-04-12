@@ -54,6 +54,11 @@ def test_build_ohlcv_feature_frame_is_time_safe():
     assert not features.empty
     assert "15m_body_ratio" in features.columns
     assert "1h_body_ratio" in features.columns
+    assert "15m_rsi_14" in features.columns
+    assert "15m_sma_dist_10" in features.columns
+    assert "15m_ema_gap_10_20" in features.columns
+    assert "15m_breakout_high_20" in features.columns
+    assert "15m_volume_z_20" in features.columns
     assert "target_up" in features.columns
     assert (features["available_ts"] <= features["as_of_ts"]).all()
 
@@ -110,6 +115,9 @@ def test_build_training_schema_runtime_row_returns_latest_feature_values():
     assert "15m_body_ratio" in row
     assert "1h_momentum_3" in row
     assert "4h_volatility_6" in row
+    assert "15m_rsi_14" in row
+    assert "1h_sma_dist_10" in row
+    assert "4h_breakout_high_20" in row
     assert "hour_sin" in row
     assert "target_up" not in row
 

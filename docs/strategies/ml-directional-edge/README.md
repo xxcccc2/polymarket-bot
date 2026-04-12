@@ -9,6 +9,7 @@ Build and operate the `ml_directional` strategy as an in-repo module. This strat
 
 - OHLCV loader and normalization in `src/ml/data_loader.py`
 - Time-safe multi-timeframe feature engineering in `src/ml/features.py`
+- Richer candle-derived OHLC features including ATR, momentum, volatility, EMA/SMA distances, EMA/SMA slopes, RSI, breakout distance, and volume z-score
 - Optional microstructure aggregation from the collector SQLite DB into training-ready `micro_*` columns
 - LightGBM-compatible model/artifact wrapper in `src/ml/model.py`
 - Walk-forward training and evaluation in `src/ml/train.py` and `src/ml/evaluate.py`
@@ -41,6 +42,66 @@ The collector now writes raw depth, agg trades, liquidations, funding, and open 
 - **For the full signal stack from the master plan:** yes, you should collect roughly 2-4 weeks of microstructure data first.
 
 That matches the master plan exactly: establish the OHLCV baseline first, then add microstructure once enough data has accumulated.
+
+## Current Direction
+
+- The current primary baseline is the upgraded OHLC-only feature stack.
+- The current full-history artifact lineup is:
+  - `ml_directional_15m_ohlc_full.pkl`
+  - `ml_directional_1h_ohlc_full.pkl`
+  - `ml_directional_4h_ohlc_full.pkl`
+  - `ml_directional_1d_ohlc_full.pkl`
+- Current ranking after training the upgraded OHLC artifacts:
+  - `15m_full` — strongest current candidate
+  - `1h_full` — second-best candidate
+  - `4h_full` — viable research artifact, weaker than 15m/1h
+  - `1d_full` — weak current candidate, not a live favorite
+- The fair overlap comparison currently favors OHLC-only over OHLC + micro on the March-April 2026 window.
+- Until a later comparison proves otherwise, improve the OHLC baseline first and only revisit microstructure after that baseline is fully evaluated.
+
+## Candle-Derived Feature Set
+
+The offline trainer and live training-schema parity path both use the same candle-derived family of features. The current stack includes:
+
+- Candle geometry:
+  - body
+  - range
+  - body ratio
+  - wick ratio
+  - close-to-range position
+- Return and volatility structure:
+  - return
+  - log return
+  - ATR
+  - ATR percent
+  - momentum windows
+  - rolling volatility windows
+- Trend and mean-reversion structure:
+  - SMA distance
+  - EMA distance
+  - SMA slope
+  - EMA slope
+  - EMA gap
+  - RSI
+- Breakout and participation structure:
+  - breakout distance to rolling high
+  - breakout distance to rolling low
+  - volume z-score
+- Context features:
+  - hour sine/cosine
+  - weekday sine/cosine
+
+The binary target remains the same for every target timeframe:
+
+- `target_up = 1` when the **next candle close is above the next candle open**
+- `target_up = 0` otherwise
+
+That means:
+
+- `15m` predicts the next `15m` candle direction
+- `1h` predicts the next `1h` candle direction
+- `4h` predicts the next `4h` candle direction
+- `1d` predicts the next `1d` candle direction
 
 ## Storage Layout
 
@@ -92,18 +153,29 @@ What it does:
 - prints row counts for each collector table
 - shows the latest timestamp seen in each table
 
-### 3. Train the baseline model
+### 3. Train OHLC-only full-history artifacts
 
 ```bash
-./.venv/bin/python -m scripts.train_ml_directional --target-timeframe 15m
+./.venv/bin/python -m scripts.train_ml_directional --target-timeframe 15m --artifact-path data/ml/artifacts/ml_directional_15m_ohlc_full.pkl
+./.venv/bin/python -m scripts.train_ml_directional --target-timeframe 1h --artifact-path data/ml/artifacts/ml_directional_1h_ohlc_full.pkl
+./.venv/bin/python -m scripts.train_ml_directional --target-timeframe 4h --artifact-path data/ml/artifacts/ml_directional_4h_ohlc_full.pkl
+./.venv/bin/python -m scripts.train_ml_directional --target-timeframe 1d --artifact-path data/ml/artifacts/ml_directional_1d_ohlc_full.pkl
 ```
 
 What it does:
 
 - loads OHLCV from `data/ml/ohlc/`
 - builds a leakage-aware training frame
+- selects a sensible default timeframe stack for the chosen target horizon
 - runs walk-forward training
-- exports an artifact to `data/ml/artifacts/ml_directional_latest.pkl`
+- exports an artifact to the path you provide
+
+Default frame stacks by target:
+
+- `15m` target: `15m`, `1h`, `4h`, `1d`
+- `1h` target: `1h`, `4h`, `1d`
+- `4h` target: `4h`, `1d`
+- `1d` target: `1d`
 
 What it does not yet do:
 
@@ -157,7 +229,9 @@ BOT_PUBLIC_CONFIG_FILE=./config/settings.chr.live BOT_WALLET_ID=CHR ./.venv/bin/
 - The live strategy only trades crypto `Up or Down` markets on horizons enabled by `ML_DIRECTIONAL_ENABLED_HORIZONS`.
 - It assumes maker-first execution and requires model edge to clear a friction buffer.
 - Final trade admission and resizing still flow through the bot and `RiskManager`.
-- Runtime feature rows are aligned to the artifact’s `feature_columns`; any unavailable fields are filled with `0.0`.
+- Runtime feature rows are aligned to the artifact’s `feature_columns`.
+- OHLC-trained artifacts are supported live through reconstructed training-schema rows from recent Binance OHLC history.
+- Micro-trained artifacts are intentionally blocked live until true `micro_*` runtime parity exists.
 - Safety rails include feed staleness halts, rolling accuracy / Brier monitoring, and automatic pauses after loss streaks.
 - The strategy now suppresses both-side exposure on the same `condition_id` while an order or unresolved position is active.
 - Resolution tracking is still conservative: it works only when the market is still observable after expiry, so do not treat rolling paper metrics as final audit-grade stats yet.
@@ -207,9 +281,11 @@ Bootstrap script: `scripts/setup_ml_collector_vps.sh`
 - [x] Add Binance microstructure collector and SQLite storage
 - [x] Add live `ml_directional` strategy and register it in the bot
 - [x] Add focused unit tests for features, artifacts, and live signal generation
-- [ ] Train OHLCV-only baseline on `15m`
-- [ ] Train OHLCV-only baseline on `1h`
-- [ ] Export validated artifact to `data/ml/artifacts/ml_directional_latest.pkl`
+- [x] Train upgraded OHLC-only full-history artifact on `15m`
+- [x] Train upgraded OHLC-only full-history artifact on `1h`
+- [x] Train upgraded OHLC-only full-history artifact on `4h`
+- [x] Train upgraded OHLC-only full-history artifact on `1d`
+- [x] Compare the four upgraded OHLC artifacts and pick live-testing candidates
 - [ ] Run replay backtest against PolyBackTest data
 - [ ] Enable `ML_DIRECTIONAL_ENABLED=true` only in paper mode first
 

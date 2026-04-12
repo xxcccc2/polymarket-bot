@@ -23,11 +23,32 @@ from src.ml.features import FeatureBuilder
 from src.ml.train import WalkForwardTrainer, filter_training_frame
 
 
+def _default_timeframes_for_target(target_timeframe: str) -> list[str]:
+    if target_timeframe == "15m":
+        return ["15m", "1h", "4h", "1d"]
+    if target_timeframe == "1h":
+        return ["1h", "4h", "1d"]
+    if target_timeframe == "4h":
+        return ["4h", "1d"]
+    if target_timeframe == "1d":
+        return ["1d"]
+    raise ValueError(f"Unsupported target timeframe: {target_timeframe}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Train the ML directional artifact")
     parser.add_argument("--asset", default="btc", help="Asset to train, default: btc")
-    parser.add_argument("--target-timeframe", default="15m", choices=["15m", "1h"], help="Prediction target")
-    parser.add_argument("--timeframes", default="15m,1h,4h", help="Comma-separated OHLCV frames to load")
+    parser.add_argument(
+        "--target-timeframe",
+        default="15m",
+        choices=["15m", "1h", "4h", "1d"],
+        help="Prediction target",
+    )
+    parser.add_argument(
+        "--timeframes",
+        default="",
+        help="Comma-separated OHLCV frames to load. Defaults depend on target timeframe.",
+    )
     parser.add_argument("--artifact-path", default="", help="Output artifact path")
     parser.add_argument("--include-microstructure", action="store_true", help="Merge collector features into training")
     parser.add_argument("--microstructure-db", default=str(ML_BINANCE_COLLECTOR_DB), help="Collector DB path")
@@ -44,6 +65,8 @@ def main() -> int:
     args = parser.parse_args()
 
     timeframes = [value.strip() for value in args.timeframes.split(",") if value.strip()]
+    if not timeframes:
+        timeframes = _default_timeframes_for_target(args.target_timeframe)
     loader = OhlcvLoader(ML_OHLC_DIR)
     dataset = loader.load_asset(args.asset, timeframes=timeframes)
     feature_builder = FeatureBuilder()
