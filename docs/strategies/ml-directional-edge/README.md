@@ -75,9 +75,11 @@ These scripts now exist and are the recommended operator entrypoints.
 
 What it does:
 
-- subscribes to Binance depth, agg trades, and force-order streams
-- polls funding rate and open interest
+- subscribes to **Binance futures** WebSocket (depth, agg trades, force-order/liquidations) — liquidations only exist on the futures stream
+- polls funding rate and open interest from the futures REST API
 - writes to `data/ml/collectors/binance_microstructure.sqlite`
+
+Override with `BINANCE_FUTURES_WS_COMBINED_URL` if needed (default: `wss://fstream.binance.com/stream`). See `docs/strategies/ml-directional-edge/COLLECTOR_VPS_DEPLOY.md` for VPS deploy and upgrade steps.
 
 ### 2. Check collector quality
 

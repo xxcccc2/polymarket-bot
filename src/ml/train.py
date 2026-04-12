@@ -14,6 +14,32 @@ from .evaluate import FoldMetrics, compute_fold_metrics, summarize_feature_stabi
 from .model import LightGBMBinaryClassifier, ModelArtifact
 
 
+def filter_training_frame(
+    dataset: pd.DataFrame,
+    *,
+    start_date: str | pd.Timestamp | None = None,
+    end_date: str | pd.Timestamp | None = None,
+    timestamp_column: str = "timestamp",
+) -> pd.DataFrame:
+    """Filter a training frame to an inclusive UTC date window."""
+    if dataset.empty:
+        return dataset.copy()
+
+    frame = dataset.copy()
+    frame[timestamp_column] = pd.to_datetime(frame[timestamp_column], utc=True)
+
+    start_ts = pd.to_datetime(start_date, utc=True) if start_date is not None else None
+    end_ts = pd.to_datetime(end_date, utc=True) if end_date is not None else None
+    if start_ts is not None and end_ts is not None and start_ts > end_ts:
+        raise ValueError("start_date must be less than or equal to end_date")
+
+    if start_ts is not None:
+        frame = frame.loc[frame[timestamp_column] >= start_ts]
+    if end_ts is not None:
+        frame = frame.loc[frame[timestamp_column] <= end_ts]
+    return frame.reset_index(drop=True)
+
+
 @dataclass
 class WalkForwardFold:
     """One expanding-window train/test split."""
@@ -91,10 +117,12 @@ class WalkForwardTrainer:
     ) -> TrainingRunResult:
         """Train through all folds and optionally export a final artifact."""
         if feature_columns is None:
+            datetime_columns = set(dataset.select_dtypes(include=["datetime", "datetimetz"]).columns)
             feature_columns = [
                 column
                 for column in dataset.columns
                 if column not in {target_column, timestamp_column, "as_of_ts", "available_ts", "target_return"}
+                and column not in datetime_columns
             ]
         feature_columns = list(feature_columns)
 

@@ -93,7 +93,7 @@ class OhlcvLoader:
     @staticmethod
     def _infer_timeframe(filename: str) -> Optional[str]:
         lowered = filename.lower()
-        for timeframe in ("1m", "5m", "15m", "1h", "4h", "1d"):
+        for timeframe in ("15m", "5m", "1m", "1h", "4h", "1d"):
             if timeframe in lowered:
                 return timeframe
         return None

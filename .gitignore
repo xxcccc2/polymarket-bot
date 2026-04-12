@@ -69,5 +69,6 @@ data/*.sqlite-trace
 data/*.sqlite-trace-lock
 data/*.sqlite-trace-shm
 data/*.sqlite-trace-wal
-
+binance_microstructure_vps.sqlite
 *.db
+*.sqlite.bak

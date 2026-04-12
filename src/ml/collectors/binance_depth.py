@@ -19,9 +19,9 @@ from typing import Optional
 import websocket
 
 from ...config import (
+    BINANCE_FUTURES_WS_COMBINED_URL,
     BINANCE_FUTURES_REST_URL,
     BINANCE_SYMBOL,
-    BINANCE_WS_COMBINED_URL,
     ML_BINANCE_COLLECTOR_DB,
     ML_COLLECTOR_DEPTH_LEVELS,
     ML_COLLECTOR_REST_POLL_SECONDS,
@@ -56,7 +56,7 @@ class BinanceMicrostructureCollector:
                 f"{self.symbol}@forceOrder",
             ]
         )
-        self._ws_url = f"{BINANCE_WS_COMBINED_URL}?streams={streams}"
+        self._ws_url = f"{BINANCE_FUTURES_WS_COMBINED_URL}?streams={streams}"
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
@@ -127,6 +127,30 @@ class BinanceMicrostructureCollector:
                     funding_rate REAL,
                     open_interest REAL
                 )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_depth_snapshots_symbol_event_time
+                ON depth_snapshots (symbol, event_time)
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_agg_trades_symbol_event_time
+                ON agg_trades (symbol, event_time)
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_liquidations_symbol_event_time
+                ON liquidations (symbol, event_time)
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_funding_open_interest_symbol_sampled_at
+                ON funding_open_interest (symbol, sampled_at)
                 """
             )
 

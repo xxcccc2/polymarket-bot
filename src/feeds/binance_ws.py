@@ -13,10 +13,12 @@ import json
 import math
 import threading
 import time
+import urllib.request
 from collections import deque
 from dataclasses import dataclass
 from typing import Callable, Deque, Dict, List, Optional
 
+import pandas as pd
 import websocket  # websocket-client library (already in requirements)
 
 from ..logging_utils import cprint
@@ -37,6 +39,14 @@ ASSET_TO_SYMBOL: Dict[str, str] = {
     "xrp": "xrpusdt",
 }
 SYMBOL_TO_ASSET: Dict[str, str] = {v: k for k, v in ASSET_TO_SYMBOL.items()}
+KLINE_INTERVAL_SECONDS: Dict[str, int] = {
+    "1m": 60,
+    "5m": 300,
+    "15m": 900,
+    "1h": 3600,
+    "4h": 14400,
+    "1d": 86400,
+}
 
 
 @dataclass
@@ -136,6 +146,7 @@ class BinanceFeed:
         self._max_reconnect_delay = 60.0
         self._min_reconnect_interval = 10.0
 
+        self._ohlcv_cache: Dict[str, tuple[pd.DataFrame, float]] = {}
         # 1h candle open tracking: sym -> (hour_bucket_ts, open_price)
         # hour_bucket_ts = Unix timestamp of the start of the current UTC hour
         self._1h_candle: Dict[str, tuple] = {}  # sym -> (bucket_ts, open_price)
@@ -176,6 +187,60 @@ class BinanceFeed:
             if not s:
                 return BinanceState()
             return _copy_state(s)
+
+    def get_recent_ohlcv(
+        self,
+        symbol: Optional[str] = None,
+        *,
+        timeframe: str = "15m",
+        limit: int = 128,
+        cache_seconds: int = 30,
+    ) -> pd.DataFrame:
+        sym = self._resolve_symbol(symbol)
+        sym_upper = sym.upper()
+        interval_seconds = KLINE_INTERVAL_SECONDS.get(timeframe)
+        if interval_seconds is None:
+            raise ValueError(f"Unsupported timeframe: {timeframe}")
+
+        cache_key = f"{sym_upper}:{timeframe}:{limit}"
+        now = time.time()
+        with self._lock:
+            cached = self._ohlcv_cache.get(cache_key)
+        if cached is not None:
+            cached_frame, cached_ts = cached
+            if now - cached_ts < cache_seconds:
+                return cached_frame.copy()
+
+        url = f"{BINANCE_REST_URL}/api/v3/klines?symbol={sym_upper}&interval={timeframe}&limit={limit + 1}"
+        with urllib.request.urlopen(url, timeout=5) as resp:
+            payload = json.loads(resp.read().decode())
+
+        rows = []
+        for item in payload:
+            if len(item) < 6:
+                continue
+            open_ts = float(item[0]) / 1000.0
+            rows.append(
+                {
+                    "timestamp": pd.to_datetime(open_ts, unit="s", utc=True),
+                    "open": float(item[1]),
+                    "high": float(item[2]),
+                    "low": float(item[3]),
+                    "close": float(item[4]),
+                    "volume": float(item[5]),
+                }
+            )
+
+        frame = pd.DataFrame(rows)
+        if not frame.empty:
+            latest_open_ts = frame.iloc[-1]["timestamp"].timestamp()
+            if now < (latest_open_ts + interval_seconds):
+                frame = frame.iloc[:-1]
+        frame = frame.tail(limit).reset_index(drop=True)
+
+        with self._lock:
+            self._ohlcv_cache[cache_key] = (frame.copy(), now)
+        return frame
 
     def get_1h_candle_open(self, symbol: Optional[str] = None) -> Optional[float]:
         """

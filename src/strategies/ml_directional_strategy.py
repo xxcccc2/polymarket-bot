@@ -42,6 +42,8 @@ from ..sizing.kelly import kelly_size
 class MLDirectionalStrategy(BaseStrategy):
     """Use a trained classifier to trade 15m and 1h BTC Up/Down markets."""
 
+    _TRAINING_TIMEFRAME_PREFIXES = ("1m", "5m", "15m", "1h", "4h", "1d")
+
     name = "ml_directional"
     description = "Model-driven directional edge for 15m/1h crypto Up/Down markets"
     version = "1.0.0"
@@ -287,11 +289,9 @@ class MLDirectionalStrategy(BaseStrategy):
         return state
 
     def _probability_for_market(self, market_data: MarketData, binance_state) -> Optional[float]:
-        feature_row = self.feature_builder.build_runtime_feature_row(
-            market_data=market_data,
-            binance_state=binance_state,
-            now_ts=time.time(),
-        )
+        feature_row = self._build_inference_feature_row(market_data, binance_state)
+        if not feature_row:
+            return None
         frame = align_feature_row(feature_row, self.feature_columns)
         probability_up = float(self.model.predict_positive_proba(frame).iloc[0])
         self._last_inference_ts = time.time()
@@ -302,6 +302,62 @@ class MLDirectionalStrategy(BaseStrategy):
         if outcome == "down":
             return 1.0 - probability_up
         return None
+
+    def _build_inference_feature_row(self, market_data: MarketData, binance_state) -> Optional[Dict[str, float]]:
+        runtime_row = self.feature_builder.build_runtime_feature_row(
+            market_data=market_data,
+            binance_state=binance_state,
+            now_ts=time.time(),
+        )
+        if not self._uses_training_schema_features():
+            return runtime_row
+        if any(column.startswith("micro_") for column in self.feature_columns):
+            self.model_error = "Loaded artifact requires live microstructure parity for micro_* columns"
+            return None
+        if not self.binance_feed or not hasattr(self.binance_feed, "get_recent_ohlcv"):
+            self.model_error = "Binance feed does not support recent OHLC retrieval for training-schema inference"
+            return None
+
+        horizon = self._extract_horizon(f"{market_data.question} {market_data.market_slug}".lower())
+        target_timeframe = horizon or "15m"
+        required_timeframes = self._required_training_timeframes(target_timeframe)
+        frames = {}
+        for timeframe in required_timeframes:
+            frame = self.binance_feed.get_recent_ohlcv("btc", timeframe=timeframe, limit=128)
+            if timeframe == target_timeframe and frame.empty:
+                self.model_error = f"No OHLC history available for target timeframe {target_timeframe}"
+                return None
+            if not frame.empty:
+                frames[timeframe] = frame
+
+        training_row = self.feature_builder.build_training_schema_runtime_row(
+            frames,
+            target_timeframe=target_timeframe,
+        )
+        if not training_row:
+            self.model_error = "Unable to construct training-schema feature row from live OHLC history"
+            return None
+        self.model_error = None
+        return {**runtime_row, **training_row}
+
+    def _uses_training_schema_features(self) -> bool:
+        for column in self.feature_columns:
+            if column in {"hour_sin", "hour_cos", "weekday_sin", "weekday_cos"}:
+                return True
+            if any(column.startswith(f"{prefix}_") for prefix in self._TRAINING_TIMEFRAME_PREFIXES):
+                return True
+        return False
+
+    def _required_training_timeframes(self, target_timeframe: str) -> List[str]:
+        ordered = []
+        for timeframe in self._TRAINING_TIMEFRAME_PREFIXES:
+            if timeframe == target_timeframe or any(
+                column.startswith(f"{timeframe}_") for column in self.feature_columns
+            ):
+                ordered.append(timeframe)
+        if target_timeframe not in ordered:
+            ordered.insert(0, target_timeframe)
+        return ordered
 
     def _compute_threshold(self, market_price: float) -> float:
         adverse_selection = 0.01

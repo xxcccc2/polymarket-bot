@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from src.ml.data_loader import MicrostructureLoader
+from src.ml.data_loader import MicrostructureLoader, OhlcvLoader
 
 
 def test_microstructure_loader_aggregates_training_features(tmp_path: Path):
@@ -46,3 +46,7 @@ def test_microstructure_loader_aggregates_training_features(tmp_path: Path):
     assert "micro_liq_delta_1m" in dataset.frame.columns
     assert "micro_funding_rate" in dataset.frame.columns
     assert row["micro_open_interest"] == 12345
+
+
+def test_ohlcv_loader_infers_15m_before_1m():
+    assert OhlcvLoader._infer_timeframe("btc_15m_data_2018_to_2026.csv") == "15m"

@@ -60,12 +60,41 @@ def align_feature_row(row: Mapping[str, float], feature_columns: Iterable[str]) 
     return pd.DataFrame([payload], columns=list(feature_columns))
 
 
+def _normalize_timestamp_column(frame: pd.DataFrame, column: str = "timestamp") -> pd.DataFrame:
+    normalized = frame.copy()
+    normalized[column] = pd.to_datetime(normalized[column], utc=True).astype("datetime64[ns, UTC]")
+    return normalized
+
+
 @dataclass
 class FeatureBuilder:
     """Build both offline OHLCV features and runtime/live feature rows."""
 
     atr_window: int = 14
     momentum_windows: tuple[int, ...] = (1, 3, 6)
+
+    def build_training_schema_runtime_row(
+        self,
+        frames: Dict[str, pd.DataFrame],
+        *,
+        target_timeframe: str = "15m",
+        microstructure_frame: Optional[pd.DataFrame] = None,
+    ) -> Dict[str, float]:
+        runtime_frame = self.build_ohlcv_feature_frame(
+            frames,
+            target_timeframe=target_timeframe,
+            include_target=False,
+            microstructure_frame=microstructure_frame,
+        )
+        if runtime_frame.empty:
+            return {}
+        latest = runtime_frame.iloc[-1]
+        return {
+            column: float(latest[column])
+            for column in runtime_frame.columns
+            if column not in {"timestamp", "as_of_ts", "available_ts", "micro_available_ts"}
+            and pd.notna(latest[column])
+        }
 
     def build_ohlcv_feature_frame(
         self,
@@ -85,7 +114,7 @@ class FeatureBuilder:
             available = ", ".join(sorted(frames))
             raise KeyError(f"Target timeframe '{target_timeframe}' not found. Available: {available}")
 
-        base = frames[target_timeframe].copy().sort_values("timestamp").reset_index(drop=True)
+        base = _normalize_timestamp_column(frames[target_timeframe]).sort_values("timestamp").reset_index(drop=True)
         base = self._add_candle_features(base, prefix=target_timeframe)
         base["as_of_ts"] = base["timestamp"]
         base["available_ts"] = base["timestamp"]
@@ -98,7 +127,7 @@ class FeatureBuilder:
         for timeframe, frame in frames.items():
             if timeframe == target_timeframe:
                 continue
-            enriched = self._add_candle_features(frame.copy(), prefix=timeframe)
+            enriched = self._add_candle_features(_normalize_timestamp_column(frame), prefix=timeframe)
             enriched = enriched.sort_values("timestamp").reset_index(drop=True)
             enriched["timestamp"] = enriched["timestamp"].shift(1)
             keep = ["timestamp"] + [col for col in enriched.columns if col.startswith(f"{timeframe}_")]
@@ -111,7 +140,7 @@ class FeatureBuilder:
             )
 
         if microstructure_frame is not None and not microstructure_frame.empty:
-            micro = microstructure_frame.copy().sort_values("timestamp").reset_index(drop=True)
+            micro = _normalize_timestamp_column(microstructure_frame).sort_values("timestamp").reset_index(drop=True)
             if "available_ts" in micro.columns:
                 micro = micro.rename(columns={"available_ts": "micro_available_ts"})
             merge_columns = ["timestamp"] + [

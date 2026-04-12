@@ -75,6 +75,9 @@ BINANCE_WS_COMBINED_URL = _getenv_nonempty(
 )
 BINANCE_REST_URL = _getenv_nonempty("BINANCE_REST_URL", "https://api.binance.com")
 BINANCE_FUTURES_REST_URL = _getenv_nonempty("BINANCE_FUTURES_REST_URL", "https://fapi.binance.com")
+BINANCE_FUTURES_WS_COMBINED_URL = _getenv_nonempty(
+    "BINANCE_FUTURES_WS_COMBINED_URL", "wss://fstream.binance.com/stream"
+)
 BINANCE_SYMBOL = os.getenv("BINANCE_SYMBOL", "btcusdt")
 # Comma-separated symbols for multi-asset feed (BTC, ETH, SOL, XRP). Single symbol = legacy mode.
 BINANCE_SYMBOLS = [

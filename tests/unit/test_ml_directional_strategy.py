@@ -35,6 +35,31 @@ class DummyBinanceFeed:
     def get_state(self, symbol="btc"):
         return DummyBinanceState()
 
+    def get_recent_ohlcv(self, symbol="btc", *, timeframe="15m", limit=128, cache_seconds=30):
+        start = datetime(2024, 1, 1, tzinfo=timezone.utc)
+        step_minutes = {"15m": 15, "1h": 60, "4h": 240}.get(timeframe, 15)
+        rows = 80 if timeframe == "15m" else 40
+        data = []
+        price = 100.0
+        for idx in range(rows):
+            ts = start.timestamp() + (step_minutes * 60 * idx)
+            open_price = price
+            close_price = price + 1.0
+            data.append(
+                {
+                    "timestamp": datetime.fromtimestamp(ts, tz=timezone.utc),
+                    "open": open_price,
+                    "high": close_price + 0.5,
+                    "low": open_price - 0.5,
+                    "close": close_price,
+                    "volume": 1000.0 + idx,
+                }
+            )
+            price += 1.0
+        import pandas as pd
+
+        return pd.DataFrame(data)
+
 
 class DummyRiskPosition:
     def __init__(self, size, current_price):
@@ -67,6 +92,22 @@ def _write_artifact(path):
             "binance_price_velocity",
             "binance_bid_pressure",
         ],
+        threshold_probability=0.53,
+    )
+    payload = {
+        "model": DeterministicEstimator(),
+        "artifact": artifact,
+        "backend": "deterministic",
+        "params": {},
+    }
+    with path.open("wb") as handle:
+        pickle.dump(payload, handle)
+
+
+def _write_training_artifact(path, feature_columns):
+    artifact = ModelArtifact(
+        version="unit-test-training-artifact",
+        feature_columns=feature_columns,
         threshold_probability=0.53,
     )
     payload = {
@@ -184,3 +225,46 @@ def test_strategy_uses_risk_manager_inventory_for_sizing(tmp_path):
     base_sized = without_inventory.analyze([_market("Up", 0.60)])[0].size
 
     assert risk_sized <= base_sized
+
+
+def test_strategy_supports_training_schema_artifact_with_live_ohlc_reconstruction(tmp_path):
+    artifact_path = tmp_path / "ml_directional_training.pkl"
+    _write_training_artifact(
+        artifact_path,
+        ["15m_body_ratio", "1h_momentum_3", "4h_volatility_6", "hour_sin"],
+    )
+
+    strategy = MLDirectionalStrategy(
+        {
+            "binance_feed": DummyBinanceFeed(),
+            "model_path": artifact_path,
+            "min_edge": 0.02,
+        }
+    )
+
+    signals = strategy.analyze([_market("Up", 0.60), _market("Down", 0.40)])
+
+    assert len(signals) == 1
+    assert strategy.model_error is None
+
+
+def test_strategy_blocks_microstructure_artifact_without_live_micro_parity(tmp_path):
+    artifact_path = tmp_path / "ml_directional_micro.pkl"
+    _write_training_artifact(
+        artifact_path,
+        ["15m_body_ratio", "micro_cvd_5m"],
+    )
+
+    strategy = MLDirectionalStrategy(
+        {
+            "binance_feed": DummyBinanceFeed(),
+            "model_path": artifact_path,
+            "min_edge": 0.02,
+        }
+    )
+
+    signals = strategy.analyze([_market("Up", 0.60)])
+
+    assert signals == []
+    assert strategy.model_error is not None
+    assert "microstructure parity" in strategy.model_error

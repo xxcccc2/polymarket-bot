@@ -93,3 +93,50 @@ def test_runtime_feature_row_contains_expected_keys():
     assert row["market_mid_price"] == 0.52
     assert row["market_orderbook_imbalance"] > 0
     assert row["binance_price_change_pct_30s"] == 0.10
+
+
+def test_build_training_schema_runtime_row_returns_latest_feature_values():
+    start = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    frames = {
+        "15m": _frame(start, 15, 80),
+        "1h": _frame(start, 60, 40),
+        "4h": _frame(start, 240, 20),
+    }
+    builder = FeatureBuilder()
+
+    row = builder.build_training_schema_runtime_row(frames, target_timeframe="15m")
+
+    assert row
+    assert "15m_body_ratio" in row
+    assert "1h_momentum_3" in row
+    assert "4h_volatility_6" in row
+    assert "hour_sin" in row
+    assert "target_up" not in row
+
+
+def test_build_ohlcv_feature_frame_normalizes_mixed_timestamp_precisions():
+    start = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    frames = {
+        "15m": _frame(start, 15, 40),
+        "1h": _frame(start, 60, 20),
+    }
+    micro = pd.DataFrame(
+        {
+            "timestamp": pd.Series(
+                pd.date_range(start=start, periods=40, freq="15min", tz="UTC"),
+                dtype="datetime64[us, UTC]",
+            ),
+            "micro_cvd_5m": [float(idx) for idx in range(40)],
+        }
+    )
+    builder = FeatureBuilder()
+
+    features = builder.build_ohlcv_feature_frame(
+        frames,
+        target_timeframe="15m",
+        microstructure_frame=micro,
+    )
+
+    assert not features.empty
+    assert str(features["timestamp"].dtype) == "datetime64[ns, UTC]"
+    assert "micro_cvd_5m" in features.columns
