@@ -399,13 +399,14 @@ class PolymarketClient:
         if last_error:
             raise last_error
     
-    def get_markets(self, next_cursor: str = "", tag: str = "") -> Dict:
+    def get_markets(self, next_cursor: str = "", tag: str = "", max_pages: Optional[int] = None) -> Dict:
         """
         Fetch available markets from Gamma API with automatic pagination.
         
         Args:
             next_cursor: Pagination cursor (used internally)
             tag: Optional tag filter (e.g. "crypto")
+            max_pages: Optional page cap override
             
         Returns:
             List of market dicts (paginated automatically)
@@ -419,9 +420,9 @@ class PolymarketClient:
             url = f"{GAMMA_HOST}/markets"
             all_markets: list = []
             cursor = next_cursor
-            max_pages = 10  # safety cap
+            page_cap = max_pages or 10
 
-            for _ in range(max_pages):
+            for _ in range(page_cap):
                 params = {"closed": "false", "limit": 100}
                 if cursor:
                     params["next_cursor"] = cursor
@@ -454,7 +455,7 @@ class PolymarketClient:
             cprint(f"❌ Failed to fetch markets: {e}", "red")
             return {"error": str(e)}
     
-    def get_events(self, limit: int = 50) -> List[Dict]:
+    def get_events(self, limit: int = 50, max_pages: Optional[int] = None, offset: int = 0) -> List[Dict]:
         """
         Fetch active events from Gamma API (includes 5-min crypto markets).
         
@@ -468,21 +469,38 @@ class PolymarketClient:
             import requests
             
             url = f"{GAMMA_HOST}/events"
-            params = {
-                "closed": "false",
-                "active": "true",
-                "limit": limit,
-                "order": "startDate",
-                "ascending": "false",
-            }
+            all_events: List[Dict] = []
+            current_offset = offset
 
-            def _request():
-                response = requests.get(url, params=params, timeout=30)
-                response.raise_for_status()
-                return response.json()
+            while True:
+                params = {
+                    "closed": "false",
+                    "active": "true",
+                    "limit": limit,
+                    "offset": current_offset,
+                    "order": "startDate",
+                    "ascending": "false",
+                }
 
-            result = self._retry_call(_request, "Fetch events")
-            return result if isinstance(result, list) else []
+                def _request():
+                    response = requests.get(url, params=params, timeout=30)
+                    response.raise_for_status()
+                    return response.json()
+
+                result = self._retry_call(_request, f"Fetch events offset={current_offset}")
+                if not isinstance(result, list) or not result:
+                    break
+
+                all_events.extend(result)
+                if max_pages is not None and max_pages > 0:
+                    max_pages -= 1
+                    if max_pages <= 0:
+                        break
+                if len(result) < limit:
+                    break
+                offset += limit
+
+            return all_events
             
         except Exception as e:
             cprint(f"⚠️ Failed to fetch events: {e}", "yellow")
@@ -937,23 +955,26 @@ class PolymarketClient:
         except Exception:
             return []
 
-    def get_balance(self) -> Optional[float]:
-        """
-        Get USDC balance.
-        
-        Note: This may require additional setup depending on API version.
-        """
+    def get_balance_diagnostics(self) -> Dict[str, Any]:
+        """Resolve live balance and expose which source produced it."""
         if PAPER_TRADING:
-            return float(PAPER_BALANCE_USD)
+            return {"balance": float(PAPER_BALANCE_USD), "source": "paper", "details": {}}
 
         if not self.is_connected or not self.client:
-            return None
+            return {"balance": None, "source": "disconnected", "details": {}}
+
+        def normalize_balance_value(value: Optional[float]) -> Optional[float]:
+            if value is None:
+                return None
+            if value >= 100000 and abs(value - round(value)) < 1e-9:
+                return value / 1_000_000.0
+            return value
 
         def parse_balance(payload) -> Optional[float]:
             if payload is None:
                 return None
             if isinstance(payload, (int, float)):
-                return float(payload)
+                return normalize_balance_value(float(payload))
             if isinstance(payload, dict):
                 for key in (
                     "balance",
@@ -968,7 +989,7 @@ class PolymarketClient:
                 ):
                     if key in payload:
                         try:
-                            return float(payload[key])
+                            return normalize_balance_value(float(payload[key]))
                         except (TypeError, ValueError):
                             return None
                 if "data" in payload:
@@ -986,30 +1007,76 @@ class PolymarketClient:
                         return value
             return None
 
-        def _try_methods():
+        def _resolve() -> Dict[str, Any]:
+            zero_candidate: Optional[float] = None
+            zero_source = "unavailable"
+            details: Dict[str, Any] = {
+                "proxy_address": PROXY_ADDRESS,
+                "signature_type": SIGNATURE_TYPE,
+            }
+
             for method_name in ("get_balance", "get_collateral", "get_account"):
                 method = getattr(self.client, method_name, None)
                 if not method:
                     continue
                 try:
                     response = method()
-                except Exception:
+                    bal = parse_balance(response)
+                    details[f"method_{method_name}"] = bal
+                except Exception as exc:
+                    details[f"method_{method_name}_error"] = self._format_error(exc)
                     continue
-                bal = parse_balance(response)
                 if bal is not None:
-                    return bal
-            # Fallback: on-chain USDC + Data API position value (total portfolio)
-            # Data API /value returns position value only — use get_balance_total
+                    if bal > 0:
+                        return {"balance": bal, "source": f"clob:{method_name}", "details": details}
+                    zero_candidate = bal
+                    zero_source = f"clob:{method_name}"
+
+            if CLOB_AVAILABLE:
+                try:
+                    params = BalanceAllowanceParams(
+                        asset_type=AssetType.COLLATERAL,
+                        signature_type=SIGNATURE_TYPE,
+                    )
+                    allowance_snapshot = self.client.get_balance_allowance(params)
+                    bal = parse_balance(allowance_snapshot)
+                    details["allowance_balance"] = bal
+                    if bal is not None:
+                        if bal > 0:
+                            return {"balance": bal, "source": "allowance", "details": details}
+                        if zero_candidate is None:
+                            zero_candidate = bal
+                            zero_source = "allowance"
+                except Exception as exc:
+                    details["allowance_error"] = self._format_error(exc)
+
             if PROXY_ADDRESS:
                 try:
                     fallback = get_balance_total(PROXY_ADDRESS)
+                    details["fallback_total"] = fallback
                     if fallback is not None and fallback >= 0:
-                        return fallback
-                except Exception:
-                    pass
-            return None
+                        return {"balance": fallback, "source": "fallback_total", "details": details}
+                except Exception as exc:
+                    details["fallback_total_error"] = self._format_error(exc)
 
-        return _call_with_timeout(_try_methods, timeout_s=BALANCE_FETCH_TIMEOUT_SECONDS, default=None)
+            return {"balance": zero_candidate, "source": zero_source, "details": details}
+
+        return _call_with_timeout(
+            _resolve,
+            timeout_s=BALANCE_FETCH_TIMEOUT_SECONDS,
+            default={"balance": None, "source": "timeout", "details": {}},
+        )
+
+    def get_balance(self) -> Optional[float]:
+        """
+        Get USDC balance.
+        
+        Note: This may require additional setup depending on API version.
+        """
+        if PAPER_TRADING:
+            return float(PAPER_BALANCE_USD)
+        diagnostics = self.get_balance_diagnostics()
+        return diagnostics.get("balance")
 
 
 # Convenience function for quick client creation

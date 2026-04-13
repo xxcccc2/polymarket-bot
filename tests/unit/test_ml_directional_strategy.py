@@ -104,9 +104,9 @@ def _write_artifact(path):
         pickle.dump(payload, handle)
 
 
-def _write_training_artifact(path, feature_columns):
+def _write_training_artifact(path, feature_columns, *, version="unit-test-training-artifact"):
     artifact = ModelArtifact(
-        version="unit-test-training-artifact",
+        version=version,
         feature_columns=feature_columns,
         threshold_probability=0.53,
     )
@@ -126,6 +126,27 @@ def _market(outcome: str, mid_price: float) -> MarketData:
         condition_id="cond-1",
         market_slug="btc-updown-15m-demo",
         question="Bitcoin Up or Down - 15 min",
+        outcome=outcome,
+        best_bid=max(0.01, mid_price - 0.01),
+        best_ask=min(0.99, mid_price + 0.01),
+        mid_price=mid_price,
+        spread=0.02,
+        volume_24h=100000.0,
+        liquidity=25000.0,
+        last_price=mid_price,
+        timestamp=datetime.now(timezone.utc),
+        orderbook={"bids": [[mid_price - 0.01, 20]], "asks": [[mid_price + 0.01, 10]]},
+        end_date_ts=2_000_000_600.0,
+    )
+
+
+def _market_with_horizon(outcome: str, mid_price: float, horizon: str) -> MarketData:
+    label = "15 min" if horizon == "15m" else "1 hour"
+    return MarketData(
+        token_id=f"token-{horizon}-{outcome.lower()}",
+        condition_id=f"cond-{horizon}",
+        market_slug=f"btc-updown-{horizon}-demo",
+        question=f"Bitcoin Up or Down - {label}",
         outcome=outcome,
         best_bid=max(0.01, mid_price - 0.01),
         best_ask=min(0.99, mid_price + 0.01),
@@ -180,6 +201,18 @@ def test_strategy_stays_idle_without_connected_feed(tmp_path):
     assert signals == []
 
 
+def test_extract_horizon_detects_hourly_clock_window_titles():
+    text = "bitcoin up or down - april 12, 7-8pm et"
+
+    assert MLDirectionalStrategy._extract_horizon(text) == "1h"
+
+
+def test_extract_horizon_detects_single_hour_titles():
+    text = "bitcoin up or down - april 13, 11am et"
+
+    assert MLDirectionalStrategy._extract_horizon(text) == "1h"
+
+
 def test_strategy_does_not_signal_both_sides_same_condition(tmp_path):
     artifact_path = tmp_path / "ml_directional.pkl"
     _write_artifact(artifact_path)
@@ -227,6 +260,34 @@ def test_strategy_uses_risk_manager_inventory_for_sizing(tmp_path):
     assert risk_sized <= base_sized
 
 
+def test_strategy_state_reports_horizon_stats(tmp_path):
+    artifact_15m = tmp_path / "ml_directional_15m.pkl"
+    artifact_1h = tmp_path / "ml_directional_1h.pkl"
+    _write_artifact(artifact_15m)
+    _write_artifact(artifact_1h)
+
+    strategy = MLDirectionalStrategy(
+        {
+            "binance_feed": DummyBinanceFeed(),
+            "model_path": artifact_15m,
+            "model_path_15m": artifact_15m,
+            "model_path_1h": artifact_1h,
+            "min_edge": 0.02,
+        }
+    )
+
+    signals = strategy.analyze([
+        _market_with_horizon("Up", 0.60, "15m"),
+        _market_with_horizon("Up", 0.60, "1h"),
+    ])
+
+    assert len(signals) == 2
+    state = strategy.get_state()
+
+    assert state["horizon_stats"]["15m"]["signals"] >= 1
+    assert state["horizon_stats"]["1h"]["signals"] >= 1
+
+
 def test_strategy_supports_training_schema_artifact_with_live_ohlc_reconstruction(tmp_path):
     artifact_path = tmp_path / "ml_directional_training.pkl"
     _write_training_artifact(
@@ -268,3 +329,40 @@ def test_strategy_blocks_microstructure_artifact_without_live_micro_parity(tmp_p
     assert signals == []
     assert strategy.model_error is not None
     assert "microstructure parity" in strategy.model_error
+
+
+def test_strategy_uses_horizon_specific_artifacts_in_single_run(tmp_path):
+    artifact_15m = tmp_path / "ml_directional_15m.pkl"
+    artifact_1h = tmp_path / "ml_directional_1h.pkl"
+    _write_training_artifact(
+        artifact_15m,
+        ["15m_body_ratio", "1h_momentum_3", "4h_volatility_6", "hour_sin"],
+        version="artifact-15m",
+    )
+    _write_training_artifact(
+        artifact_1h,
+        ["1h_body_ratio", "4h_momentum_3", "1d_volatility_6", "hour_sin"],
+        version="artifact-1h",
+    )
+
+    strategy = MLDirectionalStrategy(
+        {
+            "binance_feed": DummyBinanceFeed(),
+            "model_path_15m": artifact_15m,
+            "model_path_1h": artifact_1h,
+            "enabled_horizons": ["15m", "1h"],
+            "min_edge": 0.02,
+        }
+    )
+
+    signals = strategy.analyze(
+        [
+            _market_with_horizon("Up", 0.60, "15m"),
+            _market_with_horizon("Up", 0.60, "1h"),
+        ]
+    )
+
+    assert len(signals) == 2
+    versions = {signal.metadata["horizon"]: signal.metadata["model_version"] for signal in signals}
+    assert versions["15m"] == "artifact-15m"
+    assert versions["1h"] == "artifact-1h"

@@ -113,15 +113,17 @@ That means:
 
 Put ML directional runtime knobs in your shared profile config such as `config/settings.chr.live`, not in `.env`.
 
-The CHR profile now includes an explicit `ML_DIRECTIONAL_*` section with conservative defaults:
-
-- `ML_DIRECTIONAL_ENABLED=false`
-- `ML_DIRECTIONAL_MODEL_PATH=./data/ml/artifacts/ml_directional_latest.pkl`
-- `ML_DIRECTIONAL_ENABLED_HORIZONS=15m,1h`
-- `ML_DIRECTIONAL_MIN_PROBABILITY=0.53`
-- `ML_DIRECTIONAL_MIN_EDGE=0.03`
-- `ML_DIRECTIONAL_MAKER_OFFSET=0.005`
-- `ML_DIRECTIONAL_SIGNAL_COOLDOWN_SECONDS=45`
+ The CHR profile now includes an explicit `ML_DIRECTIONAL_*` section with conservative defaults:
+ 
+ - `ML_DIRECTIONAL_ENABLED=false`
+ - `ML_DIRECTIONAL_MODEL_PATH=./data/ml/artifacts/ml_directional_latest.pkl`
+ - `ML_DIRECTIONAL_MODEL_PATH_15M=./data/ml/artifacts/ml_directional_15m_ohlc_full.pkl`
+ - `ML_DIRECTIONAL_MODEL_PATH_1H=./data/ml/artifacts/ml_directional_1h_ohlc_full.pkl`
+ - `ML_DIRECTIONAL_ENABLED_HORIZONS=15m,1h`
+ - `ML_DIRECTIONAL_MIN_PROBABILITY=0.53`
+ - `ML_DIRECTIONAL_MIN_EDGE=0.03`
+ - `ML_DIRECTIONAL_MAKER_OFFSET=0.005`
+ - `ML_DIRECTIONAL_SIGNAL_COOLDOWN_SECONDS=45`
 - `ML_BINANCE_COLLECTOR_DB=./data/ml/collectors/binance_microstructure.sqlite`
 
 ## CLI Scripts
@@ -210,19 +212,20 @@ Do this after a baseline artifact exists. It is safe to defer replay until train
 
 ### 6. Run live in paper mode
 
-First set these in your profile config:
-
-```dotenv
-PAPER_TRADING=true
-ML_DIRECTIONAL_ENABLED=true
-ML_DIRECTIONAL_MODEL_PATH=./data/ml/artifacts/ml_directional_latest.pkl
-```
-
-Then run:
-
-```bash
-BOT_PUBLIC_CONFIG_FILE=./config/settings.chr.live BOT_WALLET_ID=CHR ./.venv/bin/python -m src.bot --strategy ml_directional
-```
+ First set these in your profile config:
+ 
+ ```dotenv
+ PAPER_TRADING=true
+ ML_DIRECTIONAL_ENABLED=true
+ ML_DIRECTIONAL_MODEL_PATH_15M=./data/ml/artifacts/ml_directional_15m_ohlc_full.pkl
+ ML_DIRECTIONAL_MODEL_PATH_1H=./data/ml/artifacts/ml_directional_1h_ohlc_full.pkl
+ ```
+ 
+ Then run:
+ 
+ ```bash
+ BOT_PUBLIC_CONFIG_FILE=./config/settings.chr.ml_paper.env BOT_WALLET_ID=CHR ./.venv/bin/python -m src.bot --strategy ml_directional
+ ```
 
 ## Live Strategy Notes
 

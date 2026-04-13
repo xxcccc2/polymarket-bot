@@ -10,6 +10,7 @@ Ties all components together:
 """
 
 import sys
+import re
 import time
 import signal
 import threading
@@ -22,7 +23,6 @@ from .dashboard import (
     Dashboard, DashboardState, BinanceSnapshot,
     StrategyRow, PortfolioSnapshot, log as dash_log,
 )
-
 from .config import (
     SCAN_INTERVAL_SECONDS,
     BALANCE_REFRESH_SECONDS,
@@ -57,6 +57,11 @@ from .config import (
     print_config,
     validate_config,
     ENABLE_STRATEGY_ANALYTICS,
+    ML_DIRECTIONAL_LEAN_MODE,
+    ML_DIRECTIONAL_LEAN_ASSETS,
+    ML_DIRECTIONAL_LEAN_HORIZONS,
+    ML_DIRECTIONAL_LEAN_EVENTS_ONLY,
+    ML_DIRECTIONAL_LEAN_BINANCE_SYMBOLS,
 )
 from .client import PolymarketClient
 from .websocket_feed import WebSocketFeed
@@ -68,6 +73,183 @@ from .analytics.strategy_tracker import StrategyTracker
 from .alerts.telegram import TelegramAlerter
 from .strategies import get_strategy, list_strategies, BaseStrategy
 from .strategies.base_strategy import MarketData, SignalType
+
+
+def _market_text_payload(market: Dict) -> str:
+    parts = [
+        market.get("question") or market.get("title") or "",
+        market.get("slug") or market.get("market_slug") or "",
+        market.get("event_title") or "",
+        market.get("event_slug") or "",
+    ]
+    return " ".join(str(part).lower() for part in parts if part)
+
+
+def _looks_like_hourly_updown_window(text: str) -> bool:
+    lowered = text.lower()
+    if "updown" not in lowered and "up or down" not in lowered:
+        return False
+    if any(token in lowered for token in ("5m", "15m", "4h", "5 min", "15 min", "4 hour", "4-hour")):
+        return False
+    if bool(
+        re.search(
+            r"\b\d{1,2}(?::\d{2})?\s*(?:am|pm)?\s*-\s*\d{1,2}(?::\d{2})?\s*(?:am|pm)\b",
+            lowered,
+        )
+    ):
+        return True
+    if bool(re.search(r"\b\d{1,2}(?::\d{2})?\s*(?:am|pm)\s*et\b", lowered)):
+        return True
+    return bool(re.search(r"-\d{1,2}(?:am|pm)-et\b", lowered))
+
+
+def _shortterm_duration_bucket(text: str) -> Optional[str]:
+    lowered = text.lower()
+    patterns = {
+        "5m": [
+            r"\b5m\b",
+            r"\b5\s*min(?:ute)?s?\b",
+            r"\b5-minute\b",
+            r"updown-5m",
+            r"up-or-down-5m",
+        ],
+        "15m": [
+            r"\b15m\b",
+            r"\b15\s*min(?:ute)?s?\b",
+            r"\b15-minute\b",
+            r"updown-15m",
+            r"up-or-down-15m",
+        ],
+        "1h": [
+            r"\b1h\b",
+            r"\b1\s*hr\b",
+            r"\b1\s*hour\b",
+            r"\b60\s*min(?:ute)?s?\b",
+            r"updown-1h",
+            r"up-or-down-1h",
+            r"up or down - 1 hour",
+            r"up or down - 1h",
+        ],
+        "4h": [
+            r"\b4h\b",
+            r"\b4\s*hr\b",
+            r"\b4\s*hour[s]?\b",
+            r"\b240\s*min(?:ute)?s?\b",
+            r"updown-4h",
+            r"up-or-down-4h",
+        ],
+    }
+    for duration, duration_patterns in patterns.items():
+        if any(re.search(pattern, lowered) for pattern in duration_patterns):
+            return duration
+    if _looks_like_hourly_updown_window(lowered):
+        return "1h"
+    return None
+
+
+def _shortterm_bucket_key(text: str) -> Optional[str]:
+    asset = None
+    lowered = text.lower()
+    if "bitcoin" in lowered or re.search(r"\bbtc\b", lowered):
+        asset = "btc"
+    elif "ethereum" in lowered or re.search(r"\beth\b", lowered):
+        asset = "eth"
+    elif "solana" in lowered or re.search(r"\bsol\b", lowered):
+        asset = "sol"
+    elif re.search(r"\bxrp\b", lowered):
+        asset = "xrp"
+    if not asset:
+        return None
+    duration = _shortterm_duration_bucket(lowered)
+    if not duration:
+        return None
+    return f"{asset}:{duration}"
+
+
+def _parse_market_end_ts(market: Dict) -> Optional[float]:
+    keys = (
+        "endDate",
+        "end_date",
+        "end_date_iso",
+        "endDateIso",
+        "endDateISO",
+        "closeTime",
+        "closedTime",
+        "endTime",
+        "endTimestamp",
+        "end_date_ts",
+        "resolutionDate",
+        "resolutionTime",
+        "resolution_date",
+        "gameStartTime",
+        "event_end_date",
+        "event_end_iso",
+        "event_close_time",
+        "event_resolution_date",
+    )
+    for key in keys:
+        val = market.get(key)
+        if val in (None, ""):
+            continue
+        if isinstance(val, (int, float)):
+            v = float(val)
+            if v > 1e12:
+                return v / 1000
+            if v > 1e9:
+                return v
+            continue
+        if isinstance(val, str):
+            raw = val.strip()
+            if not raw:
+                continue
+            if raw.isdigit():
+                v = float(raw)
+                if v > 1e12:
+                    return v / 1000
+                if v > 1e9:
+                    return v
+            try:
+                return datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp()
+            except Exception:
+                continue
+    slug = market.get("slug") or market.get("market_slug") or market.get("event_slug") or ""
+    parts = str(slug).rsplit("-", 1)
+    if len(parts) == 2 and parts[1].isdigit():
+        return float(parts[1])
+    return None
+
+
+def _extract_asset_from_bucket(bucket: Optional[str]) -> Optional[str]:
+    if not bucket or ":" not in bucket:
+        return None
+    return bucket.split(":", 1)[0]
+
+
+def _extract_horizon_from_bucket(bucket: Optional[str]) -> Optional[str]:
+    if not bucket or ":" not in bucket:
+        return None
+    return bucket.split(":", 1)[1]
+
+
+def _normalize_market_outcome_label(market: Dict, outcome_label: Optional[str], outcome_index: int) -> str:
+    label = str(outcome_label or "").strip()
+    if not label:
+        label = "Yes" if outcome_index == 0 else "No"
+
+    text = _market_text_payload(market)
+    if "updown" not in text and "up or down" not in text:
+        return label
+
+    lowered = label.lower()
+    if lowered == "yes":
+        return "UP"
+    if lowered == "no":
+        return "DOWN"
+    if lowered == "up":
+        return "UP"
+    if lowered == "down":
+        return "DOWN"
+    return label.upper()
 
 
 class PolymarketBot:
@@ -145,12 +327,28 @@ class PolymarketBot:
         # Track previous throttle to avoid spamming alerts
         self._last_alerted_throttle: float = 1.0
         
+        self.multi_strategy_mode = (strategy == "all")
+        self.selected_strategy_name = strategy
+        self.strategies: List[BaseStrategy] = []
+        self.ml_directional_lean_mode = bool(
+            ML_DIRECTIONAL_LEAN_MODE and not self.multi_strategy_mode and strategy == "ml_directional"
+        )
+        self.ml_directional_lean_assets = set(ML_DIRECTIONAL_LEAN_ASSETS or ["btc"])
+        self.ml_directional_lean_horizons = set(ML_DIRECTIONAL_LEAN_HORIZONS or ["15m", "1h"])
+
         # Binance feed for cross-asset strategies
         self.binance_feed: Optional[BinanceFeed] = None
         if ENABLE_BTC_5MIN:
             self.binance_feed = BinanceFeed()
+            if self.ml_directional_lean_mode:
+                self.binance_feed.symbols = list(ML_DIRECTIONAL_LEAN_BINANCE_SYMBOLS or ["btcusdt"])
             cprint("   ₿ Binance feed initialized", "cyan")
-        
+            if self.ml_directional_lean_mode:
+                cprint(
+                    f"   🪶 ML lean Binance symbols: {', '.join(self.binance_feed.symbols)}",
+                    "cyan",
+                )
+
         # Strategy config — inject shared resources into strategies
         merged_config = dict(strategy_config or {})
         merged_config["client"] = self.client
@@ -159,10 +357,6 @@ class PolymarketBot:
         if self.binance_feed:
             merged_config["binance_feed"] = self.binance_feed
         merged_config["1h_only"] = TERMINAL_CONVERGENCE_1H_ONLY
-        
-        # Multi-strategy mode
-        self.multi_strategy_mode = (strategy == "all")
-        self.strategies: List[BaseStrategy] = []
         
         # BTC 5-min strategies that need Binance feed
         _BTC_5MIN_STRATEGIES = ["cross_asset", "terminal_convergence", "orderbook_imbalance"]
@@ -712,7 +906,33 @@ class PolymarketBot:
                         last_ts = f"{ago/60:.0f}m ago"
                     else:
                         last_ts = f"{ago/3600:.1f}h ago"
-            
+
+            horizon_stats = state.get("horizon_stats") if isinstance(state, dict) else None
+            if strat.name == "ml_directional" and isinstance(horizon_stats, dict):
+                for horizon in ("15m", "1h"):
+                    horizon_state = horizon_stats.get(horizon, {}) or {}
+                    horizon_last_ts = ""
+                    horizon_last_value = float(horizon_state.get("last_signal_ts", 0) or 0)
+                    if horizon_last_value > 0:
+                        ago = time.time() - horizon_last_value
+                        if ago < 60:
+                            horizon_last_ts = f"{ago:.0f}s ago"
+                        elif ago < 3600:
+                            horizon_last_ts = f"{ago/60:.0f}m ago"
+                        else:
+                            horizon_last_ts = f"{ago/3600:.1f}h ago"
+
+                    strat_rows.append(StrategyRow(
+                        name=f"{strat.name}:{horizon}",
+                        signals=int(horizon_state.get("signals", 0) or 0),
+                        trades=int(horizon_state.get("trades", 0) or 0),
+                        pnl=0.0,
+                        healthy=healthy,
+                        last_signal=horizon_last_ts or "—",
+                        status=horizon_state.get("status", "—"),
+                    ))
+                continue
+
             strat_rows.append(StrategyRow(
                 name=strat.name,
                 signals=state['signals_generated'],
@@ -883,7 +1103,11 @@ class PolymarketBot:
                 for idx, token_id in enumerate(clob_tokens):
                     if not token_id:
                         continue
-                    outcome_label = raw_outcomes[idx] if idx < len(raw_outcomes) else "Yes"
+                    outcome_label = _normalize_market_outcome_label(
+                        market,
+                        raw_outcomes[idx] if idx < len(raw_outcomes) else "Yes",
+                        idx,
+                    )
                     
                     # For the first token, use API bid/ask directly
                     # For the second token, invert (complement pricing)
@@ -996,23 +1220,85 @@ class PolymarketBot:
     def _fetch_markets(self, is_refresh: bool = False):
         """Fetch and filter available markets."""
         try:
-            result = self.client.get_markets()
+            if self.ml_directional_lean_mode:
+                desired_buckets = {
+                    f"{asset}:{horizon}"
+                    for asset in self.ml_directional_lean_assets
+                    for horizon in self.ml_directional_lean_horizons
+                }
+                result = []
+                scanned_market_count = 0
+                matched_market_buckets = set()
+                market_cursor = ""
+                max_market_pages = 10
+                for _ in range(max_market_pages):
+                    batch = self.client.get_markets(next_cursor=market_cursor, tag="crypto", max_pages=1)
+                    if isinstance(batch, dict) and "error" in batch:
+                        result = batch
+                        break
+                    if not isinstance(batch, list) or not batch:
+                        break
+                    result.extend(batch)
+                    scanned_market_count += len(batch)
+                    for market in batch:
+                        bucket = _shortterm_bucket_key(_market_text_payload(market))
+                        if bucket in desired_buckets:
+                            matched_market_buckets.add(bucket)
+                    if matched_market_buckets >= desired_buckets:
+                        break
+                    last_market = batch[-1] if batch else {}
+                    market_cursor = str(
+                        last_market.get("next_cursor")
+                        or last_market.get("nextCursor")
+                        or ""
+                    ).strip()
+                    if not market_cursor:
+                        break
+            else:
+                result = self.client.get_markets()
             
             if isinstance(result, dict) and "error" in result:
                 cprint(f"❌ Failed to fetch markets: {result['error']}", "red")
                 return
             
             markets = result if isinstance(result, list) else result.get("data", [])
+            if self.ml_directional_lean_mode:
+                cprint(f"   ↳ lean market scan inspected {scanned_market_count} /markets entries", "dark_grey")
             
             # Also fetch events (5-min BTC markets live here, not in /markets)
             if ENABLE_BTC_5MIN:
-                events = self.client.get_events(limit=100)
+                event_limit = 100
+                events = []
+                scanned_events = 0
+                if self.ml_directional_lean_mode:
+                    matched_buckets = set()
+                    max_event_pages = 10
+                    for page_idx in range(max_event_pages):
+                        batch = self.client.get_events(limit=event_limit, max_pages=1, offset=page_idx * event_limit)
+                        if not batch:
+                            break
+                        events.extend(batch)
+                        scanned_events += len(batch)
+                        for event in batch:
+                            event_text = f"{event.get('title', '')} {event.get('slug', '')}".lower()
+                            bucket = _shortterm_bucket_key(event_text)
+                            if bucket in desired_buckets:
+                                matched_buckets.add(bucket)
+                            for sub_market in event.get("markets", []) or []:
+                                market_text = _market_text_payload(sub_market)
+                                bucket = _shortterm_bucket_key(market_text)
+                                if bucket in desired_buckets:
+                                    matched_buckets.add(bucket)
+                        if matched_buckets >= desired_buckets:
+                            break
+                else:
+                    events = self.client.get_events(limit=event_limit)
+                    scanned_events = len(events)
                 event_market_count = 0
                 for event in events:
                     slug = event.get("slug", "").lower()
                     title = event.get("title", "").lower()
                     text = f"{title} {slug}"
-                    # Only extract crypto up/down event sub-markets
                     is_crypto_event = any(
                         kw in text for kw in ["bitcoin", "btc", "ethereum", "eth",
                                               "solana", "sol", "xrp", "up or down", "updown"]
@@ -1030,64 +1316,63 @@ class PolymarketBot:
                             sm["question"] = event.get("title", "")
                         if not sm.get("slug"):
                             sm["slug"] = event.get("slug", "")
+                        sm["event_title"] = event.get("title", "")
+                        sm["event_slug"] = event.get("slug", "")
+                        if event.get("endDate") and not sm.get("endDate"):
+                            sm["event_end_date"] = event.get("endDate")
+                        if event.get("end_date") and not sm.get("end_date"):
+                            sm["event_end_date"] = event.get("end_date")
+                        if event.get("closeTime") and not sm.get("closeTime"):
+                            sm["event_close_time"] = event.get("closeTime")
+                        if event.get("resolutionDate") and not sm.get("resolutionDate"):
+                            sm["event_resolution_date"] = event.get("resolutionDate")
                         markets.append(sm)
                         event_market_count += 1
                 if event_market_count > 0:
                     cprint(f"📡 Found {event_market_count} crypto event markets from /events", "cyan")
+                if self.ml_directional_lean_mode:
+                    cprint(
+                        f"   ↳ lean event scan inspected {scanned_events} event(s)",
+                        "dark_grey",
+                    )
             
             # Filter markets based on settings
             filtered = []
             seen_ids = set()
             now_ts = time.time()
             max_expiry_sec = MAX_HOURS_TO_EXPIRY * 3600 if MAX_HOURS_TO_EXPIRY > 0 else 0
-            # Strict short-term duration markers (exclude generic "up or down" without timeframe).
-            shortterm_duration_markers = [
-                "5m", "15m", "1h", "4h",
-                "5 min", "5-min", "5min", "5-minute", "5 minute",
-                "15 min", "15-min", "15min",
-                "1 hour", "4 hour", "4-hour",
-                "updown-5m", "updown-15m", "updown-1h", "updown-4h",
-                "up or down - 5 min", "up or down - 15 min",
-                "up or down - 1 hour", "up or down - 1h",
-                "up or down - 4 hour", "up or down - 4h",
-            ]
-
-            def _market_end_ts(m: dict) -> Optional[float]:
-                """Parse market end/resolution timestamp. Returns Unix sec or None."""
-                for key in ("endDate", "end_date", "end_date_iso", "closeTime", "resolutionDate"):
-                    val = m.get(key)
-                    if not val:
-                        continue
-                    if isinstance(val, (int, float)):
-                        v = float(val)
-                        if v > 1e12:
-                            return v / 1000  # milliseconds
-                        if v > 1e9:
-                            return v  # seconds
-                        return None
-                    if isinstance(val, str):
-                        try:
-                            from datetime import datetime as dt
-                            # ISO or similar
-                            parsed = dt.fromisoformat(val.replace("Z", "+00:00"))
-                            return parsed.timestamp()
-                        except Exception:
-                            pass
-                # Fallback: slug like btc-updown-15m-1772402400 has Unix timestamp
-                slug = m.get("slug", "")
-                parts = slug.rsplit("-", 1)
-                if len(parts) == 2 and parts[1].isdigit():
-                    return float(parts[1])
-                return None
+            unmatched_btc_samples = []
 
             for market in markets:
-                question = (market.get("question") or market.get("title") or "").lower()
-                slug = (market.get("slug") or market.get("market_slug") or "").lower()
-                text = f"{question} {slug}"
-                is_crypto_shortterm = (
-                    any(kw in text for kw in ["bitcoin", "btc", "ethereum", "eth", "solana", "sol", "xrp"])
-                    and any(kw in text for kw in shortterm_duration_markers)
-                )
+                text = _market_text_payload(market)
+                bucket = _shortterm_bucket_key(text)
+                is_crypto_shortterm = bucket is not None
+                bucket_asset = _extract_asset_from_bucket(bucket)
+                bucket_horizon = _extract_horizon_from_bucket(bucket)
+
+                if (
+                    self.ml_directional_lean_mode
+                    and len(unmatched_btc_samples) < 5
+                    and bucket is None
+                    and any(token in text for token in ("btc", "bitcoin", "updown", "up or down"))
+                ):
+                    unmatched_btc_samples.append(
+                        {
+                            "question": market.get("question") or market.get("title") or "",
+                            "slug": market.get("slug") or market.get("market_slug") or "",
+                            "event_title": market.get("event_title") or "",
+                            "event_slug": market.get("event_slug") or "",
+                            "text": text[:180],
+                        }
+                    )
+
+                if self.ml_directional_lean_mode:
+                    if not bucket:
+                        continue
+                    if bucket_asset not in self.ml_directional_lean_assets:
+                        continue
+                    if bucket_horizon not in self.ml_directional_lean_horizons:
+                        continue
                 
                 # Deduplicate by conditionId
                 cid = market.get("conditionId") or market.get("condition_id") or market.get("id")
@@ -1101,7 +1386,7 @@ class PolymarketBot:
                     is_threshold = any(kw in text for kw in ["above", "below", "over", "under", "exceed", "reach"])
                     # Short-term cycle mode applies a tighter per-bucket nearest filter below.
                     if not is_threshold and not (SHORTTERM_NEAREST_CYCLE_ONLY and is_crypto_shortterm):
-                        end_ts = _market_end_ts(market)
+                        end_ts = _parse_market_end_ts(market)
                         if end_ts is not None and (end_ts - now_ts) > max_expiry_sec:
                             continue
                 
@@ -1131,48 +1416,27 @@ class PolymarketBot:
                     if SHORTTERM_MAX_HOURS_AHEAD > 0
                     else max_expiry_sec
                 )
-                def _shortterm_bucket(text: str) -> Optional[str]:
-                    asset = None
-                    if "bitcoin" in text or "btc" in text:
-                        asset = "btc"
-                    elif "ethereum" in text or "eth" in text:
-                        asset = "eth"
-                    elif "solana" in text or "sol" in text:
-                        asset = "sol"
-                    elif "xrp" in text:
-                        asset = "xrp"
-                    if not asset:
-                        return None
-
-                    if any(k in text for k in ["5m", "5 min", "5-min", "5min", "5-minute", "updown-5m"]):
-                        dur = "5m"
-                    elif any(k in text for k in ["15m", "15 min", "15-min", "15min", "updown-15m"]):
-                        dur = "15m"
-                    elif any(k in text for k in ["1h", "1 hour", "updown-1h"]):
-                        dur = "1h"
-                    elif any(k in text for k in ["4h", "4 hour", "4-hour", "updown-4h"]):
-                        dur = "4h"
-                    else:
-                        return None
-                    return f"{asset}:{dur}"
-
                 nearest_by_bucket: Dict[str, tuple] = {}
                 kept_non_shortterm = []
                 shortterm_seen = 0
 
                 for market in filtered:
-                    question = (market.get("question") or market.get("title") or "").lower()
-                    slug = (market.get("slug") or market.get("market_slug") or "").lower()
-                    text = f"{question} {slug}"
-                    bucket = _shortterm_bucket(text)
+                    text = _market_text_payload(market)
+                    bucket = _shortterm_bucket_key(text)
                     if not bucket:
                         kept_non_shortterm.append(market)
                         continue
 
-                    end_ts = _market_end_ts(market)
+                    if self.ml_directional_lean_mode:
+                        bucket_asset = _extract_asset_from_bucket(bucket)
+                        bucket_horizon = _extract_horizon_from_bucket(bucket)
+                        if bucket_asset not in self.ml_directional_lean_assets:
+                            continue
+                        if bucket_horizon not in self.ml_directional_lean_horizons:
+                            continue
+
+                    end_ts = _parse_market_end_ts(market)
                     if end_ts is None:
-                        # In nearest short-term mode, we require a parseable expiry.
-                        # Otherwise far-future buckets can leak through.
                         continue
 
                     remaining = end_ts - now_ts
@@ -1192,7 +1456,34 @@ class PolymarketBot:
                     f"across {len(nearest_by_bucket)} buckets (from {shortterm_seen})",
                     "cyan",
                 )
-            
+                if self.ml_directional_lean_mode:
+                    horizon_counts: Dict[str, int] = {}
+                    for market in nearest_shortterm:
+                        bucket = _shortterm_bucket_key(_market_text_payload(market))
+                        horizon = _extract_horizon_from_bucket(bucket)
+                        if horizon:
+                            horizon_counts[horizon] = horizon_counts.get(horizon, 0) + 1
+                    horizon_summary = ", ".join(
+                        f"{h}={horizon_counts.get(h, 0)}"
+                        for h in sorted(self.ml_directional_lean_horizons)
+                    )
+                    cprint(
+                        f"🪶 ML lean universe: {len(nearest_shortterm)} market(s) "
+                        f"for {', '.join(sorted(self.ml_directional_lean_assets))} "
+                        f"{', '.join(sorted(self.ml_directional_lean_horizons))}",
+                        "cyan",
+                    )
+                    cprint(f"   ↳ horizons: {horizon_summary or '—'}", "cyan")
+                    if not nearest_shortterm and unmatched_btc_samples:
+                        cprint("   ↳ unmatched BTC-ish samples:", "yellow")
+                        for sample in unmatched_btc_samples:
+                            cprint(
+                                "      "
+                                f"q={sample['question']!r} slug={sample['slug']!r} "
+                                f"event_title={sample['event_title']!r} event_slug={sample['event_slug']!r}",
+                                "yellow",
+                            )
+
             refreshed_markets: Dict[str, Dict] = {}
             for market in filtered:
                 condition_id = market.get("conditionId") or market.get("condition_id") or market.get("id")
@@ -1204,27 +1495,27 @@ class PolymarketBot:
                 self.markets = refreshed_markets
             else:
                 self.markets.update(refreshed_markets)
-            
+
             market_type = "crypto" if ONLY_CRYPTO_MARKETS else "all"
             refresh_label = "Refreshed" if is_refresh else "Found"
             cprint(f"✅ {refresh_label} {len(self.markets)} tradeable markets ({market_type})", "green")
-            
+
             # Subscribe to WebSocket for these markets
             token_ids = []
             for market in self.markets.values():
                 for token in market.get("tokens", []):
                     if token.get("token_id"):
                         token_ids.append(token["token_id"])
-                # Fallback: clobTokenIds (used by Gamma / events)
                 for tid in market.get("clobTokenIds", []) or []:
                     if isinstance(tid, str) and tid:
                         token_ids.append(tid)
                     elif isinstance(tid, dict) and tid.get("token_id"):
                         token_ids.append(tid["token_id"])
-            
+
             if token_ids:
-                self.feed.subscribe(list(dict.fromkeys(token_ids))[:50])  # Dedupe, limit 50
-                
+                subscribe_limit = 12 if self.ml_directional_lean_mode else 50
+                self.feed.subscribe(list(dict.fromkeys(token_ids))[:subscribe_limit])
+
         except Exception as e:
             cprint(f"❌ Error fetching markets: {e}", "red")
 
@@ -1243,6 +1534,8 @@ class PolymarketBot:
                     for tid in market.get("clobTokenIds", []) or []:
                         if isinstance(tid, str) and tid:
                             out.add(tid)
+                        elif isinstance(tid, dict) and tid.get("token_id"):
+                            out.add(tid["token_id"])
                 return out
 
             current_tokens = _collect_token_ids(self.markets)
@@ -1250,21 +1543,26 @@ class PolymarketBot:
 
             tokens_to_unsubscribe = list(current_tokens - new_tokens)
             tokens_to_subscribe = list(new_tokens - current_tokens)
+            subscribe_limit = 12 if self.ml_directional_lean_mode else 50
 
             if tokens_to_unsubscribe:
-                self.feed.unsubscribe(tokens_to_unsubscribe[:50])
+                self.feed.unsubscribe(tokens_to_unsubscribe[:subscribe_limit])
             if tokens_to_subscribe:
-                self.feed.subscribe(tokens_to_subscribe[:50])
+                self.feed.subscribe(tokens_to_subscribe[:subscribe_limit])
         except Exception as e:
             cprint(f"❌ WebSocket subscription refresh failed: {e}", "red")
 
     def _refresh_balance(self, force_log: bool = False) -> None:
         """Fetch latest balance and update risk manager."""
         try:
-            balance = self.client.get_balance()
+            diagnostics = self.client.get_balance_diagnostics()
+            balance = diagnostics.get("balance")
             if balance is None:
                 if force_log:
-                    cprint("⚠️  Balance unavailable from API", "yellow")
+                    cprint(
+                        f"⚠️  Balance unavailable from API (source={diagnostics.get('source', 'unknown')})",
+                        "yellow",
+                    )
                 return
 
             self.risk_manager.set_balance(balance)
@@ -1272,13 +1570,20 @@ class PolymarketBot:
             if force_log:
                 label = "PAPER" if PAPER_TRADING else "LIVE"
                 cprint(f"💰 {label} balance: ${balance:.2f}", "white")
+                if not PAPER_TRADING and balance <= 0:
+                    details = diagnostics.get("details", {}) or {}
+                    proxy = str(details.get("proxy_address") or "")
+                    proxy_short = f"{proxy[:6]}...{proxy[-4:]}" if len(proxy) >= 10 else proxy or "—"
+                    cprint(
+                        f"⚠️  Live balance resolved to $0.00 (source={diagnostics.get('source', 'unknown')}, proxy={proxy_short}, sig={details.get('signature_type', '—')})",
+                        "yellow",
+                    )
         except Exception as e:
             if force_log:
                 cprint(f"⚠️  Balance refresh failed: {e}", "yellow")
-    
+        
     def _on_orderbook_update(self, update):
         """Handle orderbook updates from WebSocket."""
-        # Update strategy with new data if needed
         pass
     
     def _on_feed_connect(self):

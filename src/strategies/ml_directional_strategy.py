@@ -4,6 +4,7 @@ ML-informed directional strategy for Polymarket BTC Up/Down markets.
 
 from __future__ import annotations
 
+import re
 import time
 from collections import deque
 from pathlib import Path
@@ -24,6 +25,8 @@ from ..config import (
     ML_DIRECTIONAL_MIN_PROBABILITY,
     ML_DIRECTIONAL_MIN_ROLLING_ACCURACY,
     ML_DIRECTIONAL_MODEL_PATH,
+    ML_DIRECTIONAL_MODEL_PATH_15M,
+    ML_DIRECTIONAL_MODEL_PATH_1H,
     ML_DIRECTIONAL_ONLY_CRYPTO,
     ML_DIRECTIONAL_ROLLING_ACCURACY_WINDOW,
     ML_DIRECTIONAL_SIGNAL_COOLDOWN_SECONDS,
@@ -53,7 +56,16 @@ class MLDirectionalStrategy(BaseStrategy):
         self.binance_feed = self.config.get("binance_feed")
         self.risk_manager = self.config.get("risk_manager")
         self.order_size_usd = self.config.get("order_size_usd", ORDER_SIZE_USD)
-        self.model_path = Path(self.config.get("model_path", ML_DIRECTIONAL_MODEL_PATH))
+        self.default_model_path = Path(self.config.get("model_path", ML_DIRECTIONAL_MODEL_PATH))
+        self.model_paths: Dict[str, Path] = {
+            "15m": Path(self.config.get("model_path_15m", self.default_model_path)),
+            "1h": Path(self.config.get("model_path_1h", self.default_model_path)),
+        }
+        if "model_path_15m" not in self.config and ML_DIRECTIONAL_MODEL_PATH_15M != ML_DIRECTIONAL_MODEL_PATH:
+            self.model_paths["15m"] = ML_DIRECTIONAL_MODEL_PATH_15M
+        if "model_path_1h" not in self.config and ML_DIRECTIONAL_MODEL_PATH_1H != ML_DIRECTIONAL_MODEL_PATH:
+            self.model_paths["1h"] = ML_DIRECTIONAL_MODEL_PATH_1H
+        self.model_path = self.default_model_path
         self.enabled = self.config.get("enabled", ML_DIRECTIONAL_ENABLED)
         self.enabled_horizons = {
             value.lower() for value in self.config.get("enabled_horizons", ML_DIRECTIONAL_ENABLED_HORIZONS)
@@ -86,7 +98,12 @@ class MLDirectionalStrategy(BaseStrategy):
         self.feature_columns = list(DEFAULT_RUNTIME_FEATURE_COLUMNS)
         self.model_threshold = self.min_probability
         self.model_error: Optional[str] = None
-        self._model_mtime: float = 0.0
+        self._models_by_horizon: Dict[str, Optional[LightGBMBinaryClassifier]] = {}
+        self._model_versions_by_horizon: Dict[str, str] = {}
+        self._feature_columns_by_horizon: Dict[str, List[str]] = {}
+        self._model_thresholds_by_horizon: Dict[str, float] = {}
+        self._model_mtimes_by_horizon: Dict[str, float] = {}
+        self._model_errors_by_horizon: Dict[str, Optional[str]] = {}
 
         self.last_signal_time: Dict[str, float] = {}
         self.positions: Dict[str, float] = {}
@@ -100,8 +117,13 @@ class MLDirectionalStrategy(BaseStrategy):
         self._paused_until = 0.0
         self._halt_reason: Optional[str] = None
         self._last_inference_ts = 0.0
+        self._horizon_signal_counts: Dict[str, int] = {"15m": 0, "1h": 0}
+        self._horizon_trade_counts: Dict[str, int] = {"15m": 0, "1h": 0}
+        self._horizon_last_signal_ts: Dict[str, float] = {"15m": 0.0, "1h": 0.0}
 
         self._load_model_if_needed(force=True)
+        if self.enabled_horizons:
+            self._model_bundle_for_horizon(sorted(self.enabled_horizons)[0])
 
     def should_trade_market(self, market_data: MarketData) -> bool:
         if not self.enabled:
@@ -132,7 +154,7 @@ class MLDirectionalStrategy(BaseStrategy):
         signals: list[Signal] = []
         seen_condition_ids: set[str] = set()
 
-        if not self.enabled or self.model is None or self.model_error:
+        if not self.enabled:
             return signals
         if not self.binance_feed:
             return signals
@@ -153,13 +175,16 @@ class MLDirectionalStrategy(BaseStrategy):
             if data.condition_id in self.active_condition_ids or data.condition_id in seen_condition_ids:
                 continue
 
-            outcome_probability = self._probability_for_market(data, current_state)
-            if outcome_probability is None:
+            inference = self._infer_market(data, current_state)
+            if inference is None:
                 continue
+            outcome_probability = float(inference["probability"])
+            model_threshold = float(inference["threshold_probability"])
+            model_version = str(inference["model_version"])
 
             threshold = max(self.min_edge, self._compute_threshold(data.mid_price))
             edge = outcome_probability - data.mid_price
-            if outcome_probability < self.model_threshold or edge <= threshold:
+            if outcome_probability < model_threshold or edge <= threshold:
                 continue
 
             bet_size_usd = self._size_bet(outcome_probability, data.mid_price, data.token_id)
@@ -191,7 +216,7 @@ class MLDirectionalStrategy(BaseStrategy):
                     "edge": round(edge, 6),
                     "threshold": round(threshold, 6),
                     "horizon": horizon,
-                    "model_version": self.model_version,
+                    "model_version": model_version,
                     "condition_id": data.condition_id,
                     "end_date_ts": data.end_date_ts,
                 },
@@ -204,8 +229,12 @@ class MLDirectionalStrategy(BaseStrategy):
             signals = signals[: self.max_signals_per_cycle]
 
         for signal in signals:
+            horizon = str(signal.metadata.get("horizon") or "")
             self.signals_generated += 1
             self.last_signal_time[signal.token_id] = time.time()
+            if horizon in self._horizon_signal_counts:
+                self._horizon_signal_counts[horizon] += 1
+                self._horizon_last_signal_ts[horizon] = self.last_signal_time[signal.token_id]
         return signals
 
     def execute(self, signals: List[Signal], order_manager) -> List[Dict]:
@@ -226,6 +255,7 @@ class MLDirectionalStrategy(BaseStrategy):
                 if result.get("success"):
                     order = result.get("order")
                     condition_id = signal.metadata.get("condition_id")
+                    horizon = str(signal.metadata.get("horizon") or "")
                     if condition_id:
                         self.active_condition_ids.add(condition_id)
                     if order is not None:
@@ -237,6 +267,8 @@ class MLDirectionalStrategy(BaseStrategy):
                             "side": signal.side,
                             "market_slug": signal.market_slug,
                         }
+                    if horizon in self._horizon_trade_counts:
+                        self._horizon_trade_counts[horizon] += 1
                     cprint(f"  ✅ ML directional order placed: {result.get('order_id')}", "green")
                 else:
                     cprint(f"  ❌ ML directional order failed: {result.get('error')}", "red")
@@ -284,34 +316,64 @@ class MLDirectionalStrategy(BaseStrategy):
                 "pending_resolutions": len(self._pending_resolutions),
                 "positions": self.positions,
                 "active_conditions": len(self.active_condition_ids),
+                "horizon_stats": {
+                    horizon: {
+                        "signals": self._horizon_signal_counts.get(horizon, 0),
+                        "trades": self._horizon_trade_counts.get(horizon, 0),
+                        "last_signal_ts": self._horizon_last_signal_ts.get(horizon, 0.0),
+                        "status": self._model_errors_by_horizon.get(horizon) or "—",
+                    }
+                    for horizon in sorted(self.enabled_horizons or {"15m", "1h"})
+                },
             }
         )
         return state
 
-    def _probability_for_market(self, market_data: MarketData, binance_state) -> Optional[float]:
-        feature_row = self._build_inference_feature_row(market_data, binance_state)
+    def _infer_market(self, market_data: MarketData, binance_state) -> Optional[Dict[str, Any]]:
+        horizon = self._extract_horizon(f"{market_data.question} {market_data.market_slug}".lower()) or "15m"
+        model, feature_columns, threshold_probability, model_version = self._model_bundle_for_horizon(horizon)
+        if model is None:
+            return None
+        feature_row = self._build_inference_feature_row(
+            market_data,
+            binance_state,
+            feature_columns=feature_columns,
+        )
         if not feature_row:
             return None
-        frame = align_feature_row(feature_row, self.feature_columns)
-        probability_up = float(self.model.predict_positive_proba(frame).iloc[0])
+        frame = align_feature_row(feature_row, feature_columns)
+        probability_up = float(model.predict_positive_proba(frame).iloc[0])
         self._last_inference_ts = time.time()
 
         outcome = (market_data.outcome or "").lower()
         if outcome == "up":
-            return probability_up
-        if outcome == "down":
-            return 1.0 - probability_up
-        return None
+            probability = probability_up
+        elif outcome == "down":
+            probability = 1.0 - probability_up
+        else:
+            return None
+        return {
+            "probability": probability,
+            "threshold_probability": threshold_probability,
+            "model_version": model_version,
+        }
 
-    def _build_inference_feature_row(self, market_data: MarketData, binance_state) -> Optional[Dict[str, float]]:
+    def _build_inference_feature_row(
+        self,
+        market_data: MarketData,
+        binance_state,
+        *,
+        feature_columns: Optional[List[str]] = None,
+    ) -> Optional[Dict[str, float]]:
+        selected_feature_columns = feature_columns or self.feature_columns
         runtime_row = self.feature_builder.build_runtime_feature_row(
             market_data=market_data,
             binance_state=binance_state,
             now_ts=time.time(),
         )
-        if not self._uses_training_schema_features():
+        if not self._uses_training_schema_features(selected_feature_columns):
             return runtime_row
-        if any(column.startswith("micro_") for column in self.feature_columns):
+        if any(column.startswith("micro_") for column in selected_feature_columns):
             self.model_error = "Loaded artifact requires live microstructure parity for micro_* columns"
             return None
         if not self.binance_feed or not hasattr(self.binance_feed, "get_recent_ohlcv"):
@@ -320,7 +382,7 @@ class MLDirectionalStrategy(BaseStrategy):
 
         horizon = self._extract_horizon(f"{market_data.question} {market_data.market_slug}".lower())
         target_timeframe = horizon or "15m"
-        required_timeframes = self._required_training_timeframes(target_timeframe)
+        required_timeframes = self._required_training_timeframes(target_timeframe, selected_feature_columns)
         frames = {}
         for timeframe in required_timeframes:
             frame = self.binance_feed.get_recent_ohlcv("btc", timeframe=timeframe, limit=128)
@@ -340,19 +402,25 @@ class MLDirectionalStrategy(BaseStrategy):
         self.model_error = None
         return {**runtime_row, **training_row}
 
-    def _uses_training_schema_features(self) -> bool:
-        for column in self.feature_columns:
+    def _uses_training_schema_features(self, feature_columns: Optional[List[str]] = None) -> bool:
+        columns = feature_columns or self.feature_columns
+        for column in columns:
             if column in {"hour_sin", "hour_cos", "weekday_sin", "weekday_cos"}:
                 return True
             if any(column.startswith(f"{prefix}_") for prefix in self._TRAINING_TIMEFRAME_PREFIXES):
                 return True
         return False
 
-    def _required_training_timeframes(self, target_timeframe: str) -> List[str]:
+    def _required_training_timeframes(
+        self,
+        target_timeframe: str,
+        feature_columns: Optional[List[str]] = None,
+    ) -> List[str]:
+        columns = feature_columns or self.feature_columns
         ordered = []
         for timeframe in self._TRAINING_TIMEFRAME_PREFIXES:
             if timeframe == target_timeframe or any(
-                column.startswith(f"{timeframe}_") for column in self.feature_columns
+                column.startswith(f"{timeframe}_") for column in columns
             ):
                 ordered.append(timeframe)
         if target_timeframe not in ordered:
@@ -393,32 +461,62 @@ class MLDirectionalStrategy(BaseStrategy):
                 return float(size) * float(current_price)
         return self.positions.get(token_id, 0.0)
 
-    def _load_model_if_needed(self, force: bool = False) -> None:
-        if not self.model_path.exists():
-            self.model = None
-            self.model_error = f"Model artifact not found: {self.model_path}"
-            return
+    def _model_bundle_for_horizon(
+        self,
+        horizon: str,
+    ) -> tuple[Optional[LightGBMBinaryClassifier], List[str], float, str]:
+        self._load_model_if_needed(horizon=horizon)
+        model = self._models_by_horizon.get(horizon)
+        self.model = model
+        self.model_path = self._model_path_for_horizon(horizon)
+        self.feature_columns = list(
+            self._feature_columns_by_horizon.get(horizon, list(DEFAULT_RUNTIME_FEATURE_COLUMNS))
+        )
+        self.model_threshold = float(self._model_thresholds_by_horizon.get(horizon, self.min_probability))
+        self.model_version = self._model_versions_by_horizon.get(horizon, "unloaded")
+        self.model_error = self._model_errors_by_horizon.get(horizon)
+        return self.model, self.feature_columns, self.model_threshold, self.model_version
 
-        mtime = self.model_path.stat().st_mtime
-        if not force and self.model is not None and mtime == self._model_mtime:
-            return
+    def _model_path_for_horizon(self, horizon: Optional[str]) -> Path:
+        if horizon and horizon in self.model_paths:
+            return self.model_paths[horizon]
+        return self.default_model_path
 
-        try:
-            self.model = LightGBMBinaryClassifier.load(self.model_path)
-            self._model_mtime = mtime
-            self.model_error = None
-            if self.model.artifact:
-                self.model_version = self.model.artifact.version
-                self.feature_columns = list(self.model.artifact.feature_columns)
-                self.model_threshold = float(self.model.artifact.threshold_probability)
-            else:
-                self.model_version = "legacy"
-                self.feature_columns = list(DEFAULT_RUNTIME_FEATURE_COLUMNS)
-                self.model_threshold = self.min_probability
-        except Exception as exc:
-            self.model = None
-            self.model_error = str(exc)
-            cprint(f"⚠️  Failed to load ML artifact: {exc}", "yellow")
+    def _load_model_if_needed(self, *, horizon: Optional[str] = None, force: bool = False) -> None:
+        horizons = [horizon] if horizon else sorted(self.enabled_horizons or {"15m", "1h"})
+        for current_horizon in horizons:
+            model_path = self._model_path_for_horizon(current_horizon)
+            if not model_path.exists():
+                self._models_by_horizon[current_horizon] = None
+                self._model_errors_by_horizon[current_horizon] = f"Model artifact not found: {model_path}"
+                continue
+
+            mtime = model_path.stat().st_mtime
+            if (
+                not force
+                and current_horizon in self._models_by_horizon
+                and self._models_by_horizon.get(current_horizon) is not None
+                and mtime == self._model_mtimes_by_horizon.get(current_horizon)
+            ):
+                continue
+
+            try:
+                model = LightGBMBinaryClassifier.load(model_path)
+                self._models_by_horizon[current_horizon] = model
+                self._model_mtimes_by_horizon[current_horizon] = mtime
+                self._model_errors_by_horizon[current_horizon] = None
+                if model.artifact:
+                    self._model_versions_by_horizon[current_horizon] = model.artifact.version
+                    self._feature_columns_by_horizon[current_horizon] = list(model.artifact.feature_columns)
+                    self._model_thresholds_by_horizon[current_horizon] = float(model.artifact.threshold_probability)
+                else:
+                    self._model_versions_by_horizon[current_horizon] = "legacy"
+                    self._feature_columns_by_horizon[current_horizon] = list(DEFAULT_RUNTIME_FEATURE_COLUMNS)
+                    self._model_thresholds_by_horizon[current_horizon] = self.min_probability
+            except Exception as exc:
+                self._models_by_horizon[current_horizon] = None
+                self._model_errors_by_horizon[current_horizon] = str(exc)
+                cprint(f"⚠️  Failed to load ML artifact for {current_horizon}: {exc}", "yellow")
 
     def _update_resolution_tracking(self, market_data: List[MarketData]) -> None:
         if not self._pending_resolutions:
@@ -487,5 +585,18 @@ class MLDirectionalStrategy(BaseStrategy):
         if "15 min" in lowered or "15m" in lowered or "15-min" in lowered:
             return "15m"
         if "1 hour" in lowered or "1h" in lowered or "hourly" in lowered:
+            return "1h"
+        if (
+            ("updown" in lowered or "up or down" in lowered)
+            and not any(token in lowered for token in ("5m", "15m", "4h", "5 min", "15 min", "4 hour", "4-hour"))
+            and (
+                re.search(
+                    r"\b\d{1,2}(?::\d{2})?\s*(?:am|pm)?\s*-\s*\d{1,2}(?::\d{2})?\s*(?:am|pm)\b",
+                    lowered,
+                )
+                or re.search(r"\b\d{1,2}(?::\d{2})?\s*(?:am|pm)\s*et\b", lowered)
+                or re.search(r"-\d{1,2}(?:am|pm)-et\b", lowered)
+            )
+        ):
             return "1h"
         return None

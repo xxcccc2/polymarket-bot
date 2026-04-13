@@ -100,12 +100,12 @@ if BOT_WALLET_ID:
     PRIVATE_KEY = os.getenv(f"POLYMARKET_PRIVATE_KEY_{_suffix}", "") or os.getenv("POLYMARKET_PRIVATE_KEY", "")
     PROXY_ADDRESS = os.getenv(f"POLYMARKET_PROXY_ADDRESS_{_suffix}", "") or os.getenv("POLYMARKET_PROXY_ADDRESS", "")
     SIGNATURE_TYPE = int(
-        os.getenv(f"SIGNATURE_TYPE_{_suffix}", os.getenv("SIGNATURE_TYPE", "2"))
+        _getenv_nonempty(f"SIGNATURE_TYPE_{_suffix}", _getenv_nonempty("SIGNATURE_TYPE", "2"))
     )
 else:
     PRIVATE_KEY = os.getenv("POLYMARKET_PRIVATE_KEY", "")
     PROXY_ADDRESS = os.getenv("POLYMARKET_PROXY_ADDRESS", "")
-    SIGNATURE_TYPE = int(os.getenv("SIGNATURE_TYPE", "2"))
+    SIGNATURE_TYPE = int(_getenv_nonempty("SIGNATURE_TYPE", "2"))
 
 # Signature types (per Polymarket docs):
 # 0 = EOA, 1 = POLY_PROXY (email/magic), 2 = GNOSIS_SAFE
@@ -488,6 +488,23 @@ ML_DIRECTIONAL_SOFT_PAUSE_SECONDS = int(os.getenv("ML_DIRECTIONAL_SOFT_PAUSE_SEC
 ML_DIRECTIONAL_HARD_LOSS_STREAK = int(os.getenv("ML_DIRECTIONAL_HARD_LOSS_STREAK", "10"))
 ML_DIRECTIONAL_HARD_PAUSE_SECONDS = int(os.getenv("ML_DIRECTIONAL_HARD_PAUSE_SECONDS", str(24 * 3600)))
 ML_DIRECTIONAL_ONLY_CRYPTO = os.getenv("ML_DIRECTIONAL_ONLY_CRYPTO", "true").lower() == "true"
+ML_DIRECTIONAL_LEAN_MODE = os.getenv("ML_DIRECTIONAL_LEAN_MODE", "false").lower() == "true"
+ML_DIRECTIONAL_LEAN_ASSETS = [
+    value.strip().lower()
+    for value in os.getenv("ML_DIRECTIONAL_LEAN_ASSETS", "btc").split(",")
+    if value.strip()
+]
+ML_DIRECTIONAL_LEAN_HORIZONS = [
+    value.strip().lower()
+    for value in os.getenv("ML_DIRECTIONAL_LEAN_HORIZONS", "15m,1h").split(",")
+    if value.strip()
+]
+ML_DIRECTIONAL_LEAN_EVENTS_ONLY = os.getenv("ML_DIRECTIONAL_LEAN_EVENTS_ONLY", "true").lower() == "true"
+ML_DIRECTIONAL_LEAN_BINANCE_SYMBOLS = [
+    value.strip().lower()
+    for value in os.getenv("ML_DIRECTIONAL_LEAN_BINANCE_SYMBOLS", "btcusdt").split(",")
+    if value.strip()
+]
 
 # =============================================================================
 # DATA PATHS
@@ -500,6 +517,12 @@ ML_ARTIFACTS_DIR = ML_DATA_DIR / "artifacts"
 ML_COLLECTORS_DIR = ML_DATA_DIR / "collectors"
 ML_DIRECTIONAL_MODEL_PATH = Path(
     os.getenv("ML_DIRECTIONAL_MODEL_PATH", str(ML_ARTIFACTS_DIR / "ml_directional_latest.pkl"))
+)
+ML_DIRECTIONAL_MODEL_PATH_15M = Path(
+    os.getenv("ML_DIRECTIONAL_MODEL_PATH_15M", str(ML_DIRECTIONAL_MODEL_PATH))
+)
+ML_DIRECTIONAL_MODEL_PATH_1H = Path(
+    os.getenv("ML_DIRECTIONAL_MODEL_PATH_1H", str(ML_DIRECTIONAL_MODEL_PATH))
 )
 ML_BINANCE_COLLECTOR_DB = Path(
     os.getenv("ML_BINANCE_COLLECTOR_DB", str(ML_COLLECTORS_DIR / "binance_microstructure.sqlite"))
@@ -583,7 +606,11 @@ def print_config():
         cprint(f"  Kelly Mode: {KELLY_FRACTION_MODE}", "white")
         cprint(f"  Binance Feed: {'API key set' if BINANCE_API_KEY else 'Public (no auth)'}", "white")
     
+    if ML_DIRECTIONAL_LEAN_MODE:
+        cprint("\n🪶 ML Lean Mode:", "cyan")
+        cprint(f"  Assets: {', '.join(ML_DIRECTIONAL_LEAN_ASSETS)}", "white")
+        cprint(f"  Horizons: {', '.join(ML_DIRECTIONAL_LEAN_HORIZONS)}", "white")
+        cprint(f"  Events Only: {'✅ ON' if ML_DIRECTIONAL_LEAN_EVENTS_ONLY else '❌ OFF'}", "white")
+        cprint(f"  Binance Symbols: {', '.join(ML_DIRECTIONAL_LEAN_BINANCE_SYMBOLS)}", "white")
+    
     cprint("="*60 + "\n", "cyan")
-
-
-
