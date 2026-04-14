@@ -479,6 +479,8 @@ ML_DIRECTIONAL_SIGNAL_COOLDOWN_SECONDS = int(os.getenv("ML_DIRECTIONAL_SIGNAL_CO
 ML_DIRECTIONAL_MAX_SIGNALS_PER_CYCLE = int(os.getenv("ML_DIRECTIONAL_MAX_SIGNALS_PER_CYCLE", "2"))
 ML_DIRECTIONAL_ATR_HALT_PERCENTILE = float(os.getenv("ML_DIRECTIONAL_ATR_HALT_PERCENTILE", "0.95"))
 ML_DIRECTIONAL_FEED_STALE_SECONDS = int(os.getenv("ML_DIRECTIONAL_FEED_STALE_SECONDS", "10"))
+ML_DIRECTIONAL_MIN_SECONDS_TO_EXPIRY_15M = int(os.getenv("ML_DIRECTIONAL_MIN_SECONDS_TO_EXPIRY_15M", "60"))
+ML_DIRECTIONAL_MIN_SECONDS_TO_EXPIRY_1H = int(os.getenv("ML_DIRECTIONAL_MIN_SECONDS_TO_EXPIRY_1H", "180"))
 ML_DIRECTIONAL_ROLLING_ACCURACY_WINDOW = int(os.getenv("ML_DIRECTIONAL_ROLLING_ACCURACY_WINDOW", "100"))
 ML_DIRECTIONAL_MIN_ROLLING_ACCURACY = float(os.getenv("ML_DIRECTIONAL_MIN_ROLLING_ACCURACY", "0.51"))
 ML_DIRECTIONAL_BRIER_WINDOW = int(os.getenv("ML_DIRECTIONAL_BRIER_WINDOW", "50"))
@@ -573,33 +575,33 @@ def print_config():
     from .logging_utils import cprint
     
     cprint("\n" + "="*60, "cyan")
-    cprint("📋 Bot Configuration", "cyan", attrs=["bold"])
+    cprint("Bot Configuration", "cyan", attrs=["bold"])
     cprint("="*60, "cyan")
     
     cprint(f"  Private Key: {'*' * 10}...{PRIVATE_KEY[-4:] if PRIVATE_KEY else 'NOT SET'}", "yellow")
     cprint(f"  Proxy Address: {PROXY_ADDRESS[:10]}...{PROXY_ADDRESS[-4:] if PROXY_ADDRESS else 'NOT SET'}", "yellow")
     cprint(f"  Signature Type: {SIGNATURE_TYPE} (Browser Wallet)", "white")
     
-    cprint("\n📊 Trading Parameters:", "cyan")
+    cprint("\nTrading Parameters:", "cyan")
     cprint(f"  Min Spread: {MIN_SPREAD_CENTS}¢", "white")
     cprint(f"  Order Size: ${ORDER_SIZE_USD}", "white")
     cprint(f"  Max Position/Market: ${MAX_POSITION_USD}", "white")
     cprint(f"  Max Total Exposure: ${MAX_TOTAL_EXPOSURE_USD}", "white")
     
-    cprint("\n⚠️  Risk Management:", "cyan")
+    cprint("\nRisk Management:", "cyan")
     cprint(f"  Daily Loss Limit: ${DAILY_LOSS_LIMIT_USD}", "white")
     cprint(f"  Min Balance: ${MIN_BALANCE_USD}", "white")
     cprint(f"  Max Active Orders: {MAX_ACTIVE_ORDERS}", "white")
     cprint(f"  Order Timeout: {ORDER_TIMEOUT_SECONDS}s", "white")
     
-    cprint("\n🔧 Bot Settings:", "cyan")
-    cprint(f"  Paper Trading: {'✅ ON' if PAPER_TRADING else '❌ OFF (LIVE!)'}", "green" if PAPER_TRADING else "red")
+    cprint("\nBot Settings:", "cyan")
+    cprint(f"  Paper Trading: {'ON' if PAPER_TRADING else 'OFF (LIVE)'}", "green" if PAPER_TRADING else "red")
     cprint(f"  Scan Interval: {SCAN_INTERVAL_SECONDS}s", "white")
-    cprint(f"  Markets: {'Crypto only' if ONLY_CRYPTO_MARKETS else '🌍 ALL markets (political, sports, crypto)'}", "cyan" if not ONLY_CRYPTO_MARKETS else "white")
+    cprint(f"  Markets: {'Crypto only' if ONLY_CRYPTO_MARKETS else 'ALL markets (political, sports, crypto)'}", "cyan" if not ONLY_CRYPTO_MARKETS else "white")
     cprint(f"  Log Level: {LOG_LEVEL}", "white")
     
     if ENABLE_BTC_5MIN:
-        cprint("\n₿  5-Min BTC Settings:", "cyan")
+        cprint("\n5-Min BTC Settings:", "cyan")
         cprint(f"  Min BTC Move: {BTC_MIN_MOVE_PCT}%", "white")
         cprint(f"  Reaction Window: {BTC_REACTION_WINDOW_SECONDS}s", "white")
         cprint(f"  Terminal Window: {TERMINAL_CONVERGENCE_WINDOW_SECONDS}s", "white")
@@ -607,10 +609,15 @@ def print_config():
         cprint(f"  Binance Feed: {'API key set' if BINANCE_API_KEY else 'Public (no auth)'}", "white")
     
     if ML_DIRECTIONAL_LEAN_MODE:
-        cprint("\n🪶 ML Lean Mode:", "cyan")
+        cprint("\nML Lean Mode:", "cyan")
         cprint(f"  Assets: {', '.join(ML_DIRECTIONAL_LEAN_ASSETS)}", "white")
         cprint(f"  Horizons: {', '.join(ML_DIRECTIONAL_LEAN_HORIZONS)}", "white")
-        cprint(f"  Events Only: {'✅ ON' if ML_DIRECTIONAL_LEAN_EVENTS_ONLY else '❌ OFF'}", "white")
+        cprint(f"  Events Only: {'ON' if ML_DIRECTIONAL_LEAN_EVENTS_ONLY else 'OFF'}", "white")
         cprint(f"  Binance Symbols: {', '.join(ML_DIRECTIONAL_LEAN_BINANCE_SYMBOLS)}", "white")
-    
+        cprint(
+            f"  Min Entry Time Left: 15m={ML_DIRECTIONAL_MIN_SECONDS_TO_EXPIRY_15M}s, "
+            f"1h={ML_DIRECTIONAL_MIN_SECONDS_TO_EXPIRY_1H}s",
+            "white",
+        )
+
     cprint("="*60 + "\n", "cyan")

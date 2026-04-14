@@ -26,7 +26,8 @@ An institutional-grade algorithmic trading platform for Polymarket prediction ma
 - **Order Lifecycle** — tracking, duplicate prevention, stale cleanup, graceful shutdown cancellation
 - **Wallet Analysis** — reverse-engineer tracked wallets to infer strategies (markets, sizing, horizons)
 - **Backtesting** — PolyBackTest API integration for historical 5m/15m Up/Down markets; replay strategies like terminal_convergence
-- **Offline ML Pipeline** — `src/ml/` package for OHLCV loading, feature engineering, walk-forward training, artifact export, and dedicated replay backtests
+- **Offline ML Pipeline** — `src/ml/` package for OHLCV loading, feature engineering (ATR, momentum, EMA/SMA distances/slopes, RSI, volume z-score), walk-forward training with LightGBM, artifact export, and dedicated replay backtests
+- **Multi-Artifact ML** — 6 trained artifacts across 15m/1h/4h/1d horizons (OHLC-only + microstructure-overlap variants); `15m_ohlc_full` is the primary live candidate
 
 ## Quick Start
 
@@ -91,8 +92,13 @@ Optional (recommended for multi-wallet):
 # Run specific strategy
 ./venv/bin/python -m src.bot --strategy cross_asset
 
-# Run the ML directional strategy (requires a trained artifact)
-./venv/bin/python -m src.bot --strategy ml_directional
+# Run the ML directional strategy (paper, recommended first)
+BOT_PUBLIC_CONFIG_FILE=./config/settings.chr.ml_paper.env BOT_WALLET_ID=CHR \
+  caffeinate -i ./.venv/bin/python -m src.bot --strategy ml_directional
+
+# Run ML directional live (after paper validation)
+BOT_PUBLIC_CONFIG_FILE=./config/settings.chr.ml_live.env BOT_WALLET_ID=CHR \
+  caffeinate -i ./.venv/bin/python -m src.bot --strategy ml_directional
 
 # Run all non-disabled strategies
 ./venv/bin/python -m src.bot --strategy all
@@ -182,18 +188,86 @@ The `ml_directional` strategy is split into:
 
 - **Offline research/training** — `src/ml/data_loader.py`, `src/ml/features.py`, `src/ml/train.py`, `src/ml/backtest.py`
 - **Live execution** — `src/strategies/ml_directional_strategy.py`
+- **Data top-up** — `scripts/topup_btc_ohlc.py` (hybrid Binance bulk + REST tail for all timeframes)
+- **Training CLI** — `scripts/train_ml_directional.py`
 
-Key settings:
+#### Trained Artifacts
+
+| Artifact | Target | Type | Accuracy | Brier | Net EV/trade | Profit Factor |
+|----------|--------|------|----------|-------|-------------|---------------|
+| `ml_directional_15m_ohlc_full.pkl` | 15m | OHLC full-history | 0.720 | 0.189 | 0.479 | 2.85 |
+| `ml_directional_1h_ohlc_full.pkl` | 1h | OHLC full-history | 0.700 | 0.198 | 0.440 | 2.60 |
+| `ml_directional_4h_ohlc_full.pkl` | 4h | OHLC full-history | 0.640 | 0.228 | 0.307 | 1.92 |
+| `ml_directional_1d_ohlc_full.pkl` | 1d | OHLC full-history | 0.513 | 0.312 | 0.027 | 1.12 |
+| `ml_directional_15m_ohlc_overlap.pkl` | 15m | OHLC (Mar–Apr window) | — | — | — | — |
+| `ml_directional_15m_micro_overlap.pkl` | 15m | OHLC + microstructure | 0.596 | 0.258 | 0.195 | 1.48 |
+
+**Current live candidates:** `15m_ohlc_full` (primary) → `1h_ohlc_full` (secondary).  
+Microstructure artifacts are intentionally blocked from live deployment until `micro_*` runtime parity is built.
+
+#### Feature Stack (OHLC-only models)
+
+Each training row is built from multi-timeframe OHLCV candles (15m + 1h + 4h + 1d for the 15m target):
+
+- **Price features** — returns, VWAP, log-price, breakout distance from rolling high/low
+- **Momentum** — rolling momentum over multiple windows
+- **Volatility** — ATR (Average True Range), realized volatility
+- **Trend** — EMA/SMA distances from price, EMA/SMA slopes
+- **Oscillators** — RSI
+- **Volume** — volume z-score
+- **Higher-timeframe context** — same feature set from 1h, 4h, 1d candles merged into each 15m row
+
+Live inference reconstructs the same schema from `BinanceFeed.get_recent_ohlcv()` + `FeatureBuilder.build_training_schema_runtime_row()` — no feature gap between training and runtime.
+
+#### Training Commands
+
+```bash
+# Top-up OHLC data (all timeframes)
+./.venv/bin/python scripts/topup_btc_ohlc.py
+
+# Train 15m full-history artifact (primary)
+./.venv/bin/python -m scripts.train_ml_directional --target-timeframe 15m \
+  --artifact-path data/ml/artifacts/ml_directional_15m_ohlc_full.pkl
+
+# Train 1h full-history artifact
+./.venv/bin/python -m scripts.train_ml_directional --target-timeframe 1h \
+  --artifact-path data/ml/artifacts/ml_directional_1h_ohlc_full.pkl
+
+# Train with microstructure (only when collector has 2-4 weeks of data)
+./.venv/bin/python -m scripts.train_ml_directional --target-timeframe 15m \
+  --include-microstructure \
+  --microstructure-db data/ml/collectors/binance_microstructure.sqlite \
+  --artifact-path data/ml/artifacts/ml_directional_15m_micro_overlap.pkl
+```
+
+The trainer uses **walk-forward expanding windows** with a 6-month minimum train window and a 2-row embargo between folds (leakage prevention).
+
+#### Key Config Settings
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `ML_DIRECTIONAL_MODEL_PATH` | `data/ml/artifacts/ml_directional_latest.pkl` | Model artifact loaded by the live strategy |
-| `ML_DIRECTIONAL_ENABLED_HORIZONS` | `15m,1h` | Supported Polymarket horizons for live trading |
-| `ML_DIRECTIONAL_MIN_PROBABILITY` | `0.53` | Minimum model confidence before a trade is considered |
-| `ML_DIRECTIONAL_MIN_EDGE` | `0.03` | Minimum model-vs-market edge after friction buffer |
-| `ML_DIRECTIONAL_MAKER_OFFSET` | `0.005` | Resting bid improvement for maker-first execution |
+| `ML_DIRECTIONAL_ENABLED` | `false` | Master switch for the strategy |
+| `ML_DIRECTIONAL_MODEL_PATH_15M` | — | Artifact path for 15m markets |
+| `ML_DIRECTIONAL_MODEL_PATH_1H` | — | Artifact path for 1h markets |
+| `ML_DIRECTIONAL_ENABLED_HORIZONS` | `15m,1h` | Polymarket horizons the strategy trades |
+| `ML_DIRECTIONAL_MIN_PROBABILITY` | `0.53` | Minimum model confidence to emit a signal |
+| `ML_DIRECTIONAL_MIN_EDGE` | `0.03` | Minimum model-vs-market edge after friction |
+| `ML_DIRECTIONAL_MAKER_OFFSET` | `0.005` | Resting bid improvement for maker-first fills |
+| `ML_DIRECTIONAL_SIGNAL_COOLDOWN_SECONDS` | `45` | Cooldown between signals on the same market |
+| `ML_DIRECTIONAL_ROLLING_ACCURACY_WINDOW` | `100` | Rolling window for live accuracy monitoring |
+| `ML_DIRECTIONAL_MIN_ROLLING_ACCURACY` | `0.51` | Auto-halt if rolling accuracy drops below this |
+| `ML_DIRECTIONAL_BRIER_WINDOW` | `50` | Window for rolling Brier score monitoring |
+| `ML_DIRECTIONAL_MAX_ROLLING_BRIER` | `0.26` | Auto-halt if Brier score exceeds this |
+| `ML_DIRECTIONAL_LEAN_MODE` | `false` | Restrict scanning to BTC crypto markets only |
 
-See [ML Directional Edge docs](docs/strategies/ml-directional-edge/README.md) for the training/backtest workflow.
+#### Promotion Gates (before live capital)
+
+1. Collect ≥200 resolved paper trades
+2. Rolling accuracy ≥53% on 15m, ≥52% on 1h
+3. Net EV > 0 after frictions
+4. No 50-trade window below 48% accuracy
+
+See [ML Directional Edge docs](docs/strategies/ml-directional-edge/README.md) and [Implementation Checklist](docs/strategies/ml-directional-edge/IMPLEMENTATION_CHECKLIST.md).
 
 ## Strategies
 
@@ -261,10 +335,14 @@ TRACKED_WALLETS=0xabc...,0xdef... python scripts/reverse_engineer_wallets.py
 
 #### 6. ML Directional Edge ✅ `ml_directional`
 Model-driven directional trading for 15m and 1h BTC Up/Down markets:
-- Offline pipeline in `src/ml/` loads OHLCV data, engineers features, trains LightGBM models, and exports artifacts
-- Dedicated replay harness applies maker-aware friction assumptions before live deployment
-- Live strategy loads the artifact, builds runtime features from Binance + Polymarket state, and emits maker-first signals
-- Includes rolling accuracy/Brier monitoring, feed staleness halts, and loss-streak pauses
+- Offline pipeline in `src/ml/` loads OHLCV data, engineers features (ATR, momentum, EMA/SMA, RSI, volume z-score), trains LightGBM via walk-forward expanding windows, and exports `.pkl` artifacts
+- **6 trained artifacts** covering 15m/1h/4h/1d horizons (OHLC-only and microstructure-overlap variants)
+- **Current primary candidate:** `ml_directional_15m_ohlc_full.pkl` (accuracy 0.720, net EV/trade 0.479, profit factor 2.85)
+- Live strategy loads artifact, reconstructs training-schema features from Binance REST OHLCV, and emits maker-first signals
+- Runtime feature parity: `BinanceFeed.get_recent_ohlcv()` + `FeatureBuilder.build_training_schema_runtime_row()` — no training/inference gap
+- Safety: rolling accuracy/Brier halts, feed-staleness halts, per-market signal cooldowns
+- **Lean mode** (`ML_DIRECTIONAL_LEAN_MODE=true`) restricts scanning to BTC-only crypto markets
+- Profile configs: `config/settings.chr.ml_paper.env` (paper), `config/settings.chr.ml_live.env` (live)
 - Docs: [ML Directional Edge](docs/strategies/ml-directional-edge/README.md)
 - Checklist: [Implementation Checklist](docs/strategies/ml-directional-edge/IMPLEMENTATION_CHECKLIST.md)
 
@@ -416,10 +494,18 @@ polymarket-bot/
 │   └── README.md                 # Attribution
 ├── Makefile                      # Builds libpmkernel from c_src
 ├── scripts/
-│   ├── analyze_wallets.py        # Reverse-engineer wallets to infer strategies
-│   ├── build_native.sh           # Build libpmkernel from c_src → lib/
-│   ├── download_polybacktest.py # Download PolyBackTest data for backtesting
-│   └── run_backtest.py          # Run backtest on downloaded data
+│   ├── analyze_wallets.py              # Reverse-engineer wallets to infer strategies
+│   ├── reverse_engineer_wallets.py     # Deep wallet analysis: size, conviction, playbook
+│   ├── build_native.sh                 # Build libpmkernel from c_src → lib/
+│   ├── download_polybacktest.py        # Download PolyBackTest data for backtesting
+│   ├── run_backtest.py                 # Run backtest on downloaded data
+│   ├── train_ml_directional.py         # Train ML artifacts (OHLC or +microstructure)
+│   ├── topup_btc_ohlc.py               # Hybrid Binance bulk + REST tail OHLC top-up
+│   ├── backtest_ml_directional.py      # Replay backtest for ML directional artifacts
+│   ├── collect_binance_microstructure.py  # Start depth/trades/OI microstructure collector
+│   ├── check_microstructure_quality.py # Verify collector freshness and row counts
+│   ├── discover_wallets.py             # Auto-discover high-PnL wallets from leaderboard
+│   └── setup_ml_collector_vps.sh       # VPS setup guide for microstructure collector
 ├── lib/                          # Compiled native library (gitignored)
 │   └── libpmkernel.dylib         # macOS — or .so on Linux
 ├── src/
@@ -450,28 +536,50 @@ polymarket-bot/
 │   │   └── strategy_tracker.py   # Per-strategy P&L, Sharpe, health
 │   ├── alerts/
 │   │   └── telegram.py           # Telegram notifications (incl. Greeks alerts)
+│   ├── ml/                           # Offline ML pipeline
+│   │   ├── data_loader.py            # OHLCV + microstructure loaders
+│   │   ├── features.py               # Feature engineering + runtime parity
+│   │   ├── train.py                  # Walk-forward trainer (LightGBM)
+│   │   ├── model.py                  # ModelArtifact, LightGBMBinaryClassifier
+│   │   ├── evaluate.py               # Fold metrics, Brier, profit factor
+│   │   ├── backtest.py               # ML replay backtest harness
+│   │   └── collectors/               # Binance microstructure collector
 │   └── strategies/
 │       ├── base_strategy.py              # Abstract base class
 │       ├── spread_strategy.py            # Avellaneda-Stoikov quoting (bs-p)
 │       ├── orderbook_imbalance_strategy.py   # Native OBI + VWAP mid (bs-p)
 │       ├── cross_asset_strategy.py       # Binance → Polymarket latency arb
 │       ├── terminal_convergence_strategy.py  # Near-expiry convergence
+│       ├── ml_directional_strategy.py    # ML-driven directional trading
 │       ├── wallet_copy_strategy.py       # Copy top traders
-│       └── ...                           # + 7 more strategies
+│       └── ...                           # + 6 more strategies
 ├── tests/
 │   └── unit/
 │       ├── test_native_engine.py         # bs-p bridge + parity tests
 │       └── ...
+├── data/ml/
+│   ├── ohlc/btc/                     # BTC OHLC CSVs (15m, 1h, 4h, 1d)
+│   ├── artifacts/                    # Trained .pkl artifacts
+│   │   ├── ml_directional_15m_ohlc_full.pkl   # Primary live candidate
+│   │   ├── ml_directional_1h_ohlc_full.pkl    # Secondary candidate
+│   │   ├── ml_directional_4h_ohlc_full.pkl
+│   │   ├── ml_directional_1d_ohlc_full.pkl
+│   │   ├── ml_directional_15m_ohlc_overlap.pkl
+│   │   └── ml_directional_15m_micro_overlap.pkl
+│   └── collectors/                   # SQLite from microstructure collector
 ├── config/
 │   ├── settings.chr.live.example         # CHR wallet bs-p config template
-│   └── settings.bb.example
+│   ├── settings.chr.ml_paper.env         # ML directional paper profile
+│   └── settings.chr.ml_live.env          # ML directional live profile
 ├── docs/
+│   ├── strategies/
+│   │   └── ml-directional-edge/
+│   │       ├── README.md                 # Full training/backtest workflow
+│   │       └── IMPLEMENTATION_CHECKLIST.md  # Operational runbook + promotion gates
 │   ├── bs-p/
 │   │   ├── bs-p_integration_plan_*.md    # Full integration plan
-│   │   ├── deployment-guide.md           # Testing → paper → live guide
-│   │   └── What your bot already does well.md
-│   ├── to-do.md
-│   └── knowledge/
+│   │   └── deployment-guide.md           # Testing → paper → live guide
+│   └── backtesting/
 ├── env.example
 ├── requirements.txt
 └── README.md
@@ -487,6 +595,7 @@ polymarket-bot/
 | 4 | ✅ Complete | Telegram alerts, order lifecycle fixes, deployment hardening |
 | 5 | ✅ Complete | VPIN smart money, sentiment pipeline, combinatorial arb, wallet copy |
 | 6 | ✅ Complete | bs-p native engine: A-S quoting, inventory Kelly, portfolio Greeks, shock testing |
+| ML | ✅ Artifacts trained | 15m/1h/4h/1d OHLC artifacts trained; 15m primary candidate; paper deployment next |
 
 ## Adding New Strategies
 

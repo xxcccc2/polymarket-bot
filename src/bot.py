@@ -54,6 +54,8 @@ from .config import (
     BALANCE_STALE_BLOCK_BUYS,
     BALANCE_STALE_MAX_SECONDS,
     POLYMARKET_MIN_ORDER_SIZE,
+    ML_DIRECTIONAL_MIN_SECONDS_TO_EXPIRY_15M,
+    ML_DIRECTIONAL_MIN_SECONDS_TO_EXPIRY_1H,
     print_config,
     validate_config,
     ENABLE_STRATEGY_ANALYTICS,
@@ -167,6 +169,20 @@ def _shortterm_bucket_key(text: str) -> Optional[str]:
 
 
 def _parse_market_end_ts(market: Dict) -> Optional[float]:
+    shortterm_text = _market_text_payload(market)
+    if _shortterm_bucket_key(shortterm_text):
+        for slug_key in ("slug", "market_slug", "event_slug"):
+            slug = str(market.get(slug_key) or "")
+            parts = slug.rsplit("-", 1)
+            if len(parts) == 2 and parts[1].isdigit():
+                bucket = _shortterm_bucket_key(f"{shortterm_text} {slug}")
+                horizon = _extract_horizon_from_bucket(bucket)
+                duration_seconds = _bucket_duration_seconds(horizon)
+                anchor_ts = float(parts[1])
+                if duration_seconds:
+                    return anchor_ts + duration_seconds
+                return anchor_ts
+
     keys = (
         "endDate",
         "end_date",
@@ -231,6 +247,23 @@ def _extract_horizon_from_bucket(bucket: Optional[str]) -> Optional[str]:
     return bucket.split(":", 1)[1]
 
 
+def _bucket_duration_seconds(bucket_horizon: Optional[str]) -> Optional[int]:
+    mapping = {
+        "5m": 5 * 60,
+        "15m": 15 * 60,
+        "1h": 60 * 60,
+        "4h": 4 * 60 * 60,
+    }
+    return mapping.get(str(bucket_horizon or "").lower())
+
+
+def _current_cycle_end_ts(now_ts: float, bucket_horizon: Optional[str]) -> Optional[float]:
+    duration_seconds = _bucket_duration_seconds(bucket_horizon)
+    if not duration_seconds or now_ts <= 0:
+        return None
+    return ((int(now_ts) // duration_seconds) + 1) * duration_seconds
+
+
 def _normalize_market_outcome_label(market: Dict, outcome_label: Optional[str], outcome_index: int) -> str:
     label = str(outcome_label or "").strip()
     if not label:
@@ -278,21 +311,21 @@ class PolymarketBot:
             strategy_config: Optional strategy configuration overrides
         """
         cprint("\n" + "="*60, "cyan")
-        cprint("🤖 Polymarket Trading Bot", "cyan", attrs=["bold"])
+        cprint("Polymarket Trading Bot", "cyan", attrs=["bold"])
         cprint("="*60, "cyan")
         
         # Validate configuration
         errors = validate_config()
         if errors:
             for error in errors:
-                cprint(f"❌ {error}", "red")
+                cprint(f"ERROR: {error}", "red")
             raise ValueError("Configuration errors - check .env file")
         
         # Print config
         print_config()
         
         # Initialize components
-        cprint("🔧 Initializing components...", "cyan")
+        cprint("Initializing components...", "cyan")
 
         self.client = PolymarketClient()
         self.feed = WebSocketFeed()
@@ -342,10 +375,10 @@ class PolymarketBot:
             self.binance_feed = BinanceFeed()
             if self.ml_directional_lean_mode:
                 self.binance_feed.symbols = list(ML_DIRECTIONAL_LEAN_BINANCE_SYMBOLS or ["btcusdt"])
-            cprint("   ₿ Binance feed initialized", "cyan")
+            cprint("Binance feed initialized", "cyan")
             if self.ml_directional_lean_mode:
                 cprint(
-                    f"   🪶 ML lean Binance symbols: {', '.join(self.binance_feed.symbols)}",
+                    f"Lean Binance symbols: {', '.join(self.binance_feed.symbols)}",
                     "cyan",
                 )
 
@@ -369,7 +402,7 @@ class PolymarketBot:
         
         # Log disabled strategies
         if DISABLED_STRATEGIES:
-            cprint(f"   🚫 Disabled: {', '.join(DISABLED_STRATEGIES)}", "yellow")
+            cprint(f"Disabled: {', '.join(DISABLED_STRATEGIES)}", "yellow")
         
         def _load_strategy(name: str) -> Optional[BaseStrategy]:
             """Load a strategy, skipping if disabled."""
@@ -378,7 +411,7 @@ class PolymarketBot:
             return get_strategy(name, **merged_config)
         
         if self.multi_strategy_mode:
-            cprint("📈 Loading ALL strategies (multi-strategy mode)", "cyan", attrs=["bold"])
+            cprint("Loading ALL strategies (multi-strategy mode)", "cyan", attrs=["bold"])
             strat_names = list(_CLASSIC_STRATEGIES)
             if ENABLE_BTC_5MIN and self.binance_feed:
                 strat_names.extend(_BTC_5MIN_STRATEGIES)
@@ -388,29 +421,29 @@ class PolymarketBot:
                 strat = _load_strategy(name)
                 if strat:
                     self.strategies.append(strat)
-                    cprint(f"   ✅ {name}: {strat.description}", "white")
+                    cprint(f"{name}: {strat.description}", "white")
             self.strategy = self.strategies[0] if self.strategies else None
         elif strategy == "btc_5min":
             # Special mode: run only the 5-min BTC strategies
-            cprint("📈 Loading BTC 5-min strategies", "cyan", attrs=["bold"])
+            cprint("Loading BTC 5-min strategies", "cyan", attrs=["bold"])
             for name in _BTC_5MIN_STRATEGIES:
                 strat = _load_strategy(name)
                 if strat:
                     self.strategies.append(strat)
-                    cprint(f"   ✅ {name}: {strat.description}", "white")
+                    cprint(f"{name}: {strat.description}", "white")
             # Also load passive/advanced strategies that pair well
             for extra in ["stink_bid", "arbitrage", "vpin", "sentiment", "combinatorial_arb", "wallet_copy"]:
                 strat = _load_strategy(extra)
                 if strat:
                     self.strategies.append(strat)
                     tag = "(passive)" if extra == "stink_bid" else "(advanced)"
-                    cprint(f"   ✅ {extra}: {strat.description} {tag}", "white")
+                    cprint(f"{extra}: {strat.description} {tag}", "white")
             self.strategy = self.strategies[0] if self.strategies else None
         else:
-            cprint(f"📈 Loading strategy: {strategy}", "cyan")
+            cprint(f"Loading strategy: {strategy}", "cyan")
             self.strategy: BaseStrategy = get_strategy(strategy, **merged_config)
             self.strategies = [self.strategy]
-            cprint(f"   {self.strategy.description}", "white")
+            cprint(f"{self.strategy.description}", "white")
         
         # State
         self.is_running = False
@@ -419,6 +452,8 @@ class PolymarketBot:
         self._scan_count = 0
         self._last_balance_refresh_success_ts = 0.0
         self._last_positions_sync_ts = 0.0
+        self._stale_shortterm_condition_ids: set[str] = set()
+        self._stale_shortterm_market_slugs: set[str] = set()
         
         # TUI dashboard
         self.dashboard = Dashboard()
@@ -432,7 +467,7 @@ class PolymarketBot:
         signal.signal(signal.SIGINT, self._handle_shutdown)
         signal.signal(signal.SIGTERM, self._handle_shutdown)
         
-        cprint("✅ Bot initialized!\n", "green")
+        cprint("Bot initialized!\n", "green")
     
     def _handle_shutdown(self, signum, frame):
         """Handle shutdown signals gracefully. Keep handler minimal so it returns quickly."""
@@ -443,23 +478,23 @@ class PolymarketBot:
         self._shutdown_requested = True
         set_dashboard_mode(False)
         self.dashboard.stop()
-        cprint("\n\n⚠️  Shutdown signal received... (Ctrl+C again to force quit)", "yellow")
+        cprint("\n\nShutdown signal received... (Ctrl+C again to force quit)", "yellow")
         self.is_running = False
         # Main loop will exit and call stop() to cancel orders, etc.
     
     def start(self):
         """Start the trading bot."""
         if self.is_running:
-            cprint("⚠️  Bot already running", "yellow")
+            cprint("Bot already running", "yellow")
             return
         
         cprint("\n" + "="*60, "green")
-        cprint("🚀 Starting Polymarket Bot", "green", attrs=["bold"])
+        cprint("Starting Polymarket Bot", "green", attrs=["bold"])
         cprint("="*60, "green")
         
         # Connect to Polymarket
         if not self.client.connect():
-            cprint("❌ Failed to connect to Polymarket", "red")
+            cprint("Failed to connect to Polymarket", "red")
             return
         
         # Initialize order manager with connected client
@@ -478,7 +513,7 @@ class PolymarketBot:
         self.feed.on_disconnect(self._on_feed_disconnect)
         
         # Fetch initial markets
-        cprint("\n📡 Fetching markets...", "cyan")
+        cprint("\nFetching markets...", "cyan")
         self._fetch_markets()
 
         # Refresh balance before starting
@@ -487,9 +522,9 @@ class PolymarketBot:
         # WebSocket disabled - using REST polling only (more reliable)
         if ENABLE_WEBSOCKET_FEED:
             self.feed.start(blocking=False)
-            cprint("📡 WebSocket feed enabled", "cyan")
+            cprint("WebSocket feed enabled", "cyan")
         else:
-            cprint("📡 Using REST API polling (WebSocket disabled)", "cyan")
+            cprint("Using REST API polling (WebSocket disabled)", "cyan")
         
         # Start Binance feed for cross-asset strategies
         if self.binance_feed:
@@ -503,29 +538,29 @@ class PolymarketBot:
         
         # Start main trading loop
         strat_names = [s.name for s in self.strategies]
-        cprint("\n✨ Bot is running!", "green", attrs=["bold"])
+        cprint("\nBot is running!", "green", attrs=["bold"])
         if self.multi_strategy_mode or len(self.strategies) > 1:
-            cprint(f"   Strategies: {', '.join(strat_names)}", "cyan", attrs=["bold"])
+            cprint(f"Strategies: {', '.join(strat_names)}", "cyan", attrs=["bold"])
         elif self.strategy:
-            cprint(f"   Strategy: {self.strategy.name}", "white")
-        cprint(f"   Markets: {len(self.markets)} crypto markets", "white")
-        cprint(f"   Paper Trading: {'✅ ON' if PAPER_TRADING else '❌ OFF (LIVE!)'}", 
+            cprint(f"Strategy: {self.strategy.name}", "white")
+        cprint(f"Markets: {len(self.markets)} crypto markets", "white")
+        cprint(f"Paper Trading: {'ON' if PAPER_TRADING else 'OFF (LIVE)'}", 
                "green" if PAPER_TRADING else "red")
-        cprint(f"   Scan Interval: {SCAN_INTERVAL_SECONDS}s", "white")
-        cprint(f"   Mode: {'WebSocket + REST' if ENABLE_WEBSOCKET_FEED else 'REST API polling'}", "white")
+        cprint(f"Scan Interval: {SCAN_INTERVAL_SECONDS}s", "white")
+        cprint(f"Mode: {'WebSocket + REST' if ENABLE_WEBSOCKET_FEED else 'REST API polling'}", "white")
         if self.binance_feed:
             syms = getattr(self.binance_feed, "symbols", ["btcusdt"])
             sym_str = ",".join(s.upper() for s in syms)
-            cprint(f"   Binance Feed: ✅ {sym_str}", "cyan")
+            cprint(f"Binance Feed: {sym_str}", "cyan")
         if self.risk_manager.adaptive_enabled:
-            cprint(f"   Adaptive Risk: ✅ bankroll-proportional", "cyan")
-        cprint("\n   Press Ctrl+C to stop\n", "yellow")
+            cprint("Adaptive Risk: bankroll-proportional", "cyan")
+        cprint("\nPress Ctrl+C to stop\n", "yellow")
         
         # Start TUI dashboard — takes over the terminal
         time.sleep(0.5)  # let final startup messages flush
         self.dashboard.start()
         set_dashboard_mode(True)
-        dash_log("✅ Bot started — dashboard active")
+        dash_log("Bot started — dashboard active")
         
         # Telegram startup alert
         balance = self.risk_manager.current_balance
@@ -547,7 +582,7 @@ class PolymarketBot:
         set_dashboard_mode(False)
         self.dashboard.stop()
         
-        cprint("\n🛑 Stopping bot...", "yellow")
+        cprint("\nStopping bot...", "yellow")
         self.is_running = False
         
         # Stop all strategies
@@ -561,10 +596,10 @@ class PolymarketBot:
         if self.order_manager:
             active = self.order_manager.get_active_orders()
             if active:
-                cprint(f"   🧹 Cancelling {len(active)} active orders...", "yellow")
+                cprint(f"Cancelling {len(active)} active orders...", "yellow")
             cancelled = self.order_manager.cancel_all_orders("Bot shutdown")
             if cancelled:
-                cprint(f"   ✅ Cancelled {cancelled} orders", "yellow")
+                cprint(f"Cancelled {cancelled} orders", "yellow")
             self.order_manager.stop_cleanup_loop()
         
         # Stop Binance feed
@@ -595,7 +630,7 @@ class PolymarketBot:
         self.telegram.alert_shutdown("User requested")
         self.telegram.stop()
         
-        cprint("👋 Bot stopped\n", "green")
+        cprint("Bot stopped\n", "green")
     
     def _main_loop(self):
         """Main trading loop."""
@@ -619,16 +654,17 @@ class PolymarketBot:
                     self._scan_and_trade()
                     dt = time.time() - t0
                     if dt > 5:
-                        cprint(f"   ⏱️  scan_and_trade took {dt:.1f}s (slow!)", "yellow")
+                        cprint(f"scan_and_trade took {dt:.1f}s (slow!)", "yellow")
                     last_scan = time.time()  # use actual time, not stale `now`
                 
                 # Check for fills periodically
                 if time.time() - last_fill_check >= fill_check_interval:
                     t0 = time.time()
                     self._check_for_fills()
+                    self._cancel_out_of_cycle_shortterm_orders()
                     dt = time.time() - t0
                     if dt > 5:
-                        cprint(f"   ⏱️  fill_check took {dt:.1f}s (slow!)", "yellow")
+                        cprint(f"fill_check took {dt:.1f}s (slow!)", "yellow")
                     last_fill_check = time.time()
 
                 # Refresh balance periodically
@@ -637,7 +673,7 @@ class PolymarketBot:
                     self._refresh_balance()
                     dt = time.time() - t0
                     if dt > 5:
-                        cprint(f"   ⏱️  balance_refresh took {dt:.1f}s (slow!)", "yellow")
+                        cprint(f"balance_refresh took {dt:.1f}s (slow!)", "yellow")
                     last_balance_check = time.time()
 
                 # Refresh market universe periodically
@@ -646,7 +682,7 @@ class PolymarketBot:
                     self._fetch_markets(is_refresh=True)
                     dt = time.time() - t0
                     if dt > 5:
-                        cprint(f"   ⏱️  market_refresh took {dt:.1f}s (slow!)", "yellow")
+                        cprint(f"market_refresh took {dt:.1f}s (slow!)", "yellow")
                     last_market_refresh = time.time()
 
                 # Sync order state + positions from exchange/API (catches missed fills)
@@ -661,7 +697,7 @@ class PolymarketBot:
                         last_sync = time.time()
                         self._last_positions_sync_ts = time.time()
                     except Exception as e:
-                        cprint(f"   ⚠️  sync error: {e}", "yellow")
+                        cprint(f"sync error: {e}", "yellow")
                 
                 # Small sleep to prevent CPU spinning
                 time.sleep(0.1)
@@ -669,7 +705,7 @@ class PolymarketBot:
             except KeyboardInterrupt:
                 break
             except Exception as e:
-                cprint(f"❌ Main loop error: {e}", "red")
+                cprint(f"Main loop error: {e}", "red")
                 time.sleep(1)
         
         self.stop()
@@ -683,7 +719,7 @@ class PolymarketBot:
         # Check if trading is allowed
         can_trade, reason = self.risk_manager.can_trade()
         if not can_trade:
-            cprint(f"⏸️  Trading paused: {reason}", "yellow")
+            cprint(f"Trading paused: {reason}", "yellow")
             self._push_dashboard_state()
             return
         
@@ -692,18 +728,18 @@ class PolymarketBot:
         
         if not market_data_list:
             if not _DASHBOARD_MODE:
-                cprint(f"📊 Scanning {len(self.markets)} markets... (no price data yet)", "white")
+                cprint(f"Scanning {len(self.markets)} markets... (no price data yet)", "white")
             self._push_dashboard_state()
             return
         
         # Binance state (logged to panel, not spammed to log)
         if not _DASHBOARD_MODE:
-            cprint(f"\n📊 Analyzed {len(market_data_list)} tokens @ {datetime.now().strftime('%H:%M:%S')}", "cyan")
+            cprint(f"\nAnalyzed {len(market_data_list)} tokens @ {datetime.now().strftime('%H:%M:%S')}", "cyan")
             if hasattr(self, 'binance_feed') and self.binance_feed:
                 bs = self.binance_feed.get_state()
                 if bs.connected and bs.last_price > 0:
                     cprint(
-                        f"   📡 BTC ${bs.last_price:,.0f} | "
+                        f"BTC ${bs.last_price:,.0f} | "
                         f"10s={bs.price_change_pct_10s:+.4f}% "
                         f"30s={bs.price_change_pct_30s:+.4f}% "
                         f"60s={bs.price_change_pct_60s:+.4f}% | "
@@ -711,7 +747,7 @@ class PolymarketBot:
                         "dark_grey",
                     )
                 elif not bs.connected:
-                    cprint("   📡 Binance: NOT CONNECTED", "red")
+                    cprint("Binance: NOT CONNECTED", "red")
         
         # First-scan diagnostic: show market matching stats
         if not self._first_scan_done:
@@ -722,7 +758,7 @@ class PolymarketBot:
         if self.risk_manager.adaptive_enabled:
             throttle = self.risk_manager.get_throttle_factor()
             if throttle < 1.0:
-                cprint(f"⚠️  Throttle: {throttle*100:.0f}% (drawdown protection active)", "yellow")
+                cprint(f"Throttle: {throttle*100:.0f}% (drawdown protection active)", "yellow")
         
         # Run each strategy
         total_signals = 0
@@ -733,7 +769,7 @@ class PolymarketBot:
             if self.analytics_enabled and self.strategy_tracker:
                 healthy, health_reason = self.strategy_tracker.is_strategy_healthy(strategy.name)
                 if not healthy:
-                    cprint(f"[{strat_name}] ⏸️  Disabled: {health_reason}", "yellow")
+                    cprint(f"[{strat_name}] Disabled: {health_reason}", "yellow")
                     continue
             
             # Run strategy analysis
@@ -752,6 +788,30 @@ class PolymarketBot:
                     adaptive_size = self.risk_manager.get_adaptive_order_size(trade_value)
                     exec_signal = sig
                     resized = False
+                    condition_id = str(sig.metadata.get("condition_id") or "")
+                    market_slug = str(sig.market_slug or "")
+
+                    if (
+                        (condition_id and condition_id in self._stale_shortterm_condition_ids)
+                        or (market_slug and market_slug in self._stale_shortterm_market_slugs)
+                    ):
+                        n_blocked += 1
+                        block_reason = "Short-term signal suppressed until next market refresh"
+                        continue
+
+                    stale_reason = None if is_sell else self._shortterm_signal_stale_reason(sig)
+                    if stale_reason:
+                        if condition_id:
+                            self._stale_shortterm_condition_ids.add(condition_id)
+                        if market_slug:
+                            self._stale_shortterm_market_slugs.add(market_slug)
+                        n_blocked += 1
+                        block_reason = stale_reason
+                        cprint(
+                            f"Skipped short-term signal: {sig.market_slug} ({stale_reason})",
+                            "yellow",
+                        )
+                        continue
 
                     if (
                         BALANCE_STALE_BLOCK_BUYS
@@ -808,7 +868,7 @@ class PolymarketBot:
                                         self._adaptive_resize_log = _arl
                                         throttle = self.risk_manager.get_throttle_factor()
                                         cprint(
-                                            f"🔧 [{strat_name}] adaptive resize: "
+                                            f"adaptive resize: "
                                             f"${original_notional:.2f} -> ${resized_notional:.2f} "
                                             f"({sig.size:.2f} -> {exec_signal.size:.2f} shares, throttle {throttle*100:.0f}%)",
                                             "cyan",
@@ -845,7 +905,7 @@ class PolymarketBot:
                 
                 # Log summary: executed trades always, risk blocks throttled
                 if n_executed > 0:
-                    cprint(f"🎯 [{strat_name}] {n_executed}/{len(signals)} signal(s) executed!", "green", attrs=["bold"])
+                    cprint(f"[{strat_name}] {n_executed}/{len(signals)} signal(s) executed!", "green", attrs=["bold"])
                 if n_blocked > 0:
                     import time as _t
                     _rb_log = getattr(self, '_risk_block_log', {})
@@ -853,14 +913,14 @@ class PolymarketBot:
                     if _now - _rb_log.get(strat_name, 0) >= 30:
                         _rb_log[strat_name] = _now
                         self._risk_block_log = _rb_log
-                        cprint(f"⚠️  [{strat_name}] {n_blocked} blocked: {block_reason}", "yellow")
+                        cprint(f"[{strat_name}] {n_blocked} blocked: {block_reason}", "yellow")
             else:
                 # "No opportunities" is noise — skip in dashboard mode
                 if not _DASHBOARD_MODE:
-                    cprint(f"   [{strat_name}] No opportunities", "white")
+                    cprint(f"[{strat_name}] No opportunities", "white")
         
         if total_signals == 0 and not _DASHBOARD_MODE:
-            cprint(f"   Waiting for opportunities...", "white")
+            cprint("Waiting for opportunities...", "white")
         
         # Update the TUI dashboard
         self._push_dashboard_state()
@@ -1195,13 +1255,13 @@ class PolymarketBot:
             if len(sample_all) < 5:
                 sample_all.append(f"Q={q[:60]} | slug={slug[:40]}")
 
-        cprint(f"\n   🔍 Market Diagnostics (first scan):", "cyan", attrs=["bold"])
-        cprint(f"      Total tokens: {len(market_data_list)}", "white")
-        cprint(f"      Crypto markets: {crypto_count}", "white")
-        cprint(f"      BTC markets: {btc_count}", "white")
-        cprint(f"      BTC short-term markets: {btc_5min_count}", "white")
-        cprint(f"      With orderbook data: {with_orderbook}", "white")
-        cprint(f"      With recent trades: {with_trades}", "white")
+        cprint("\nMarket Diagnostics (first scan):", "cyan", attrs=["bold"])
+        cprint(f"Total tokens: {len(market_data_list)}", "white")
+        cprint(f"Crypto markets: {crypto_count}", "white")
+        cprint(f"BTC markets: {btc_count}", "white")
+        cprint(f"BTC short-term markets: {btc_5min_count}", "white")
+        cprint(f"With orderbook data: {with_orderbook}", "white")
+        cprint(f"With recent trades: {with_trades}", "white")
 
         # Combinatorial arb: threshold markets (above/below + numeric)
         threshold_count = sum(
@@ -1209,61 +1269,82 @@ class PolymarketBot:
             if any(kw in (md.question or "").lower() for kw in ["above", "below", "over", "under", "exceed", "reach"])
             and any(kw in (md.question or "").lower() for kw in ["bitcoin", "btc", "ethereum", "eth", "solana", "sol"])
         )
-        cprint(f"      Threshold markets (combo_arb): {threshold_count}", "white")
+        cprint(f"Threshold markets (combo_arb): {threshold_count}", "white")
 
         if btc_5min_count == 0:
-            cprint(f"      ⚠️  No BTC short-term markets matched!", "yellow")
-            cprint(f"      Sample markets (first 5):", "yellow")
+            cprint(f"No BTC short-term markets matched!", "yellow")
+            cprint(f"Sample markets (first 5):", "yellow")
             for s in sample_all:
-                cprint(f"        {s}", "yellow")
+                cprint(f"{s}", "yellow")
 
     def _fetch_markets(self, is_refresh: bool = False):
         """Fetch and filter available markets."""
         try:
+            now_ts = time.time()
+            desired_buckets = {
+                f"{asset}:{horizon}"
+                for asset in self.ml_directional_lean_assets
+                for horizon in self.ml_directional_lean_horizons
+            } if self.ml_directional_lean_mode else set()
+            lean_target_max_sec = 0.0
             if self.ml_directional_lean_mode:
-                desired_buckets = {
-                    f"{asset}:{horizon}"
-                    for asset in self.ml_directional_lean_assets
-                    for horizon in self.ml_directional_lean_horizons
-                }
-                result = []
-                scanned_market_count = 0
-                matched_market_buckets = set()
-                market_cursor = ""
-                max_market_pages = 10
-                for _ in range(max_market_pages):
-                    batch = self.client.get_markets(next_cursor=market_cursor, tag="crypto", max_pages=1)
-                    if isinstance(batch, dict) and "error" in batch:
-                        result = batch
-                        break
-                    if not isinstance(batch, list) or not batch:
-                        break
-                    result.extend(batch)
-                    scanned_market_count += len(batch)
-                    for market in batch:
-                        bucket = _shortterm_bucket_key(_market_text_payload(market))
-                        if bucket in desired_buckets:
-                            matched_market_buckets.add(bucket)
-                    if matched_market_buckets >= desired_buckets:
-                        break
-                    last_market = batch[-1] if batch else {}
-                    market_cursor = str(
-                        last_market.get("next_cursor")
-                        or last_market.get("nextCursor")
-                        or ""
-                    ).strip()
-                    if not market_cursor:
-                        break
+                if SHORTTERM_MAX_HOURS_AHEAD > 0:
+                    lean_target_max_sec = SHORTTERM_MAX_HOURS_AHEAD * 3600
+                elif MAX_HOURS_TO_EXPIRY > 0:
+                    lean_target_max_sec = MAX_HOURS_TO_EXPIRY * 3600
+
+            def _is_within_lean_target_window(market_like: Dict) -> bool:
+                if not self.ml_directional_lean_mode:
+                    return True
+                end_ts = _parse_market_end_ts(market_like)
+                if end_ts is None:
+                    return False
+                remaining = end_ts - now_ts
+                if remaining < 0:
+                    return False
+                if lean_target_max_sec > 0 and remaining > lean_target_max_sec:
+                    return False
+                return True
+
+            if self.ml_directional_lean_mode:
+                if ML_DIRECTIONAL_LEAN_EVENTS_ONLY:
+                    result = []
+                    scanned_market_count = 0
+                else:
+                    result = []
+                    scanned_market_count = 0
+                    matched_market_buckets = set()
+                    market_cursor = ""
+                    max_market_pages = 10
+                    for _ in range(max_market_pages):
+                        page = self.client.get_markets_page(next_cursor=market_cursor, tag="crypto")
+                        if isinstance(page, dict) and "error" in page:
+                            result = page
+                            break
+                        batch = page.get("data", []) if isinstance(page, dict) else []
+                        if not isinstance(batch, list) or not batch:
+                            break
+                        result.extend(batch)
+                        scanned_market_count += len(batch)
+                        for market in batch:
+                            bucket = _shortterm_bucket_key(_market_text_payload(market))
+                            if bucket in desired_buckets and _is_within_lean_target_window(market):
+                                matched_market_buckets.add(bucket)
+                        if matched_market_buckets >= desired_buckets:
+                            break
+                        market_cursor = str(page.get("next_cursor", "") if isinstance(page, dict) else "").strip()
+                        if not market_cursor:
+                            break
             else:
                 result = self.client.get_markets()
             
             if isinstance(result, dict) and "error" in result:
-                cprint(f"❌ Failed to fetch markets: {result['error']}", "red")
+                cprint(f"Failed to fetch markets: {result['error']}", "red")
                 return
             
             markets = result if isinstance(result, list) else result.get("data", [])
             if self.ml_directional_lean_mode:
-                cprint(f"   ↳ lean market scan inspected {scanned_market_count} /markets entries", "dark_grey")
+                cprint(f"lean market scan inspected {scanned_market_count} /markets entries", "dark_grey")
             
             # Also fetch events (5-min BTC markets live here, not in /markets)
             if ENABLE_BTC_5MIN:
@@ -1271,26 +1352,45 @@ class PolymarketBot:
                 events = []
                 scanned_events = 0
                 if self.ml_directional_lean_mode:
-                    matched_buckets = set()
-                    max_event_pages = 10
-                    for page_idx in range(max_event_pages):
-                        batch = self.client.get_events(limit=event_limit, max_pages=1, offset=page_idx * event_limit)
-                        if not batch:
-                            break
-                        events.extend(batch)
-                        scanned_events += len(batch)
-                        for event in batch:
-                            event_text = f"{event.get('title', '')} {event.get('slug', '')}".lower()
-                            bucket = _shortterm_bucket_key(event_text)
-                            if bucket in desired_buckets:
-                                matched_buckets.add(bucket)
-                            for sub_market in event.get("markets", []) or []:
-                                market_text = _market_text_payload(sub_market)
-                                bucket = _shortterm_bucket_key(market_text)
-                                if bucket in desired_buckets:
+                    if ML_DIRECTIONAL_LEAN_EVENTS_ONLY:
+                        events = self.client.get_events(limit=event_limit)
+                        scanned_events = len(events)
+                    else:
+                        matched_buckets = set()
+                        max_event_pages = 10
+                        for page_idx in range(max_event_pages):
+                            batch = self.client.get_events(limit=event_limit, max_pages=1, offset=page_idx * event_limit)
+                            if not batch:
+                                break
+                            events.extend(batch)
+                            scanned_events += len(batch)
+                            for event in batch:
+                                event_text = f"{event.get('title', '')} {event.get('slug', '')}".lower()
+                                bucket = _shortterm_bucket_key(event_text)
+                                if bucket in desired_buckets and _is_within_lean_target_window(event):
                                     matched_buckets.add(bucket)
-                        if matched_buckets >= desired_buckets:
-                            break
+                                for sub_market in event.get("markets", []) or []:
+                                    sm = dict(sub_market)
+                                    if not sm.get("question"):
+                                        sm["question"] = event.get("title", "")
+                                    if not sm.get("slug"):
+                                        sm["slug"] = event.get("slug", "")
+                                    sm["event_title"] = event.get("title", "")
+                                    sm["event_slug"] = event.get("slug", "")
+                                    if event.get("endDate") and not sm.get("endDate"):
+                                        sm["event_end_date"] = event.get("endDate")
+                                    if event.get("end_date") and not sm.get("end_date"):
+                                        sm["event_end_date"] = event.get("end_date")
+                                    if event.get("closeTime") and not sm.get("closeTime"):
+                                        sm["event_close_time"] = event.get("closeTime")
+                                    if event.get("resolutionDate") and not sm.get("resolutionDate"):
+                                        sm["event_resolution_date"] = event.get("resolutionDate")
+                                    market_text = _market_text_payload(sm)
+                                    bucket = _shortterm_bucket_key(market_text)
+                                    if bucket in desired_buckets and _is_within_lean_target_window(sm):
+                                        matched_buckets.add(bucket)
+                            if matched_buckets >= desired_buckets:
+                                break
                 else:
                     events = self.client.get_events(limit=event_limit)
                     scanned_events = len(events)
@@ -1329,19 +1429,79 @@ class PolymarketBot:
                         markets.append(sm)
                         event_market_count += 1
                 if event_market_count > 0:
-                    cprint(f"📡 Found {event_market_count} crypto event markets from /events", "cyan")
+                    cprint(f"Found {event_market_count} crypto event markets from /events", "cyan")
                 if self.ml_directional_lean_mode:
                     cprint(
-                        f"   ↳ lean event scan inspected {scanned_events} event(s)",
+                        f"lean event scan inspected {scanned_events} event(s)",
                         "dark_grey",
                     )
+
+            if self.ml_directional_lean_mode:
+                discovered_buckets = set()
+                for market in markets:
+                    bucket = _shortterm_bucket_key(_market_text_payload(market))
+                    if bucket in desired_buckets:
+                        discovered_buckets.add(bucket)
+                if not discovered_buckets:
+                    cprint("Lean scan found no BTC short-term buckets; widening search", "yellow")
+                    broad_markets = self.client.get_markets(tag="crypto", max_pages=30)
+                    if isinstance(broad_markets, list) and broad_markets:
+                        seen_ids = {
+                            market.get("conditionId") or market.get("condition_id") or market.get("id")
+                            for market in markets
+                        }
+                        added_markets = 0
+                        for market in broad_markets:
+                            cid = market.get("conditionId") or market.get("condition_id") or market.get("id")
+                            if cid in seen_ids:
+                                continue
+                            markets.append(market)
+                            seen_ids.add(cid)
+                            added_markets += 1
+                        cprint(f"fallback added {added_markets} /markets entries", "dark_grey")
+
+                    broad_events = self.client.get_events(limit=100, max_pages=20)
+                    extra_event_market_count = 0
+                    for event in broad_events:
+                        slug = event.get("slug", "").lower()
+                        title = event.get("title", "").lower()
+                        text = f"{title} {slug}"
+                        is_crypto_event = any(
+                            kw in text for kw in ["bitcoin", "btc", "ethereum", "eth", "solana", "sol", "xrp", "up or down", "updown"]
+                        )
+                        if not is_crypto_event:
+                            continue
+                        for sub_market in event.get("markets", []):
+                            if sub_market.get("closed"):
+                                continue
+                            if not sub_market.get("acceptingOrders"):
+                                continue
+                            sm = dict(sub_market)
+                            if not sm.get("question"):
+                                sm["question"] = event.get("title", "")
+                            if not sm.get("slug"):
+                                sm["slug"] = event.get("slug", "")
+                            sm["event_title"] = event.get("title", "")
+                            sm["event_slug"] = event.get("slug", "")
+                            if event.get("endDate") and not sm.get("endDate"):
+                                sm["event_end_date"] = event.get("endDate")
+                            if event.get("end_date") and not sm.get("end_date"):
+                                sm["event_end_date"] = event.get("end_date")
+                            if event.get("closeTime") and not sm.get("closeTime"):
+                                sm["event_close_time"] = event.get("closeTime")
+                            if event.get("resolutionDate") and not sm.get("resolutionDate"):
+                                sm["event_resolution_date"] = event.get("resolutionDate")
+                            markets.append(sm)
+                            extra_event_market_count += 1
+                    if extra_event_market_count > 0:
+                        cprint(f"fallback added {extra_event_market_count} event markets", "dark_grey")
             
             # Filter markets based on settings
             filtered = []
             seen_ids = set()
-            now_ts = time.time()
             max_expiry_sec = MAX_HOURS_TO_EXPIRY * 3600 if MAX_HOURS_TO_EXPIRY > 0 else 0
             unmatched_btc_samples = []
+            lean_candidate_counts: Dict[str, int] = {}
 
             for market in markets:
                 text = _market_text_payload(market)
@@ -1349,6 +1509,16 @@ class PolymarketBot:
                 is_crypto_shortterm = bucket is not None
                 bucket_asset = _extract_asset_from_bucket(bucket)
                 bucket_horizon = _extract_horizon_from_bucket(bucket)
+                is_target_lean_bucket = (
+                    self.ml_directional_lean_mode
+                    and bucket is not None
+                    and bucket_asset in self.ml_directional_lean_assets
+                    and bucket_horizon in self.ml_directional_lean_horizons
+                )
+
+                def _mark_reason(reason: str) -> None:
+                    if is_target_lean_bucket:
+                        lean_candidate_counts[reason] = lean_candidate_counts.get(reason, 0) + 1
 
                 if (
                     self.ml_directional_lean_mode
@@ -1370,13 +1540,16 @@ class PolymarketBot:
                     if not bucket:
                         continue
                     if bucket_asset not in self.ml_directional_lean_assets:
+                        _mark_reason("wrong_asset")
                         continue
                     if bucket_horizon not in self.ml_directional_lean_horizons:
+                        _mark_reason("wrong_horizon")
                         continue
                 
                 # Deduplicate by conditionId
                 cid = market.get("conditionId") or market.get("condition_id") or market.get("id")
                 if cid in seen_ids:
+                    _mark_reason("duplicate")
                     continue
                 seen_ids.add(cid)
                 
@@ -1388,16 +1561,23 @@ class PolymarketBot:
                     if not is_threshold and not (SHORTTERM_NEAREST_CYCLE_ONLY and is_crypto_shortterm):
                         end_ts = _parse_market_end_ts(market)
                         if end_ts is not None and (end_ts - now_ts) > max_expiry_sec:
+                            _mark_reason("too_far_expiry")
                             continue
                 
                 # Check if crypto-related (if filter enabled)
                 if ONLY_CRYPTO_MARKETS:
                     is_crypto = any(kw in text for kw in CRYPTO_MARKET_KEYWORDS)
                     if not is_crypto:
+                        _mark_reason("not_crypto")
                         continue
                 
                 # Check not closed
                 if market.get("closed"):
+                    _mark_reason("closed")
+                    continue
+
+                if self.ml_directional_lean_mode and not market.get("acceptingOrders", True):
+                    _mark_reason("not_accepting_orders")
                     continue
                 
                 # Crypto short-term (5m/15m/1h/4h from events) often have 0 volume — bypass
@@ -1406,8 +1586,10 @@ class PolymarketBot:
                 volume = float(market.get("volume24hr", 0) or market.get("volume24hrClob", 0) or 0)
                 min_vol = 0 if (is_crypto_shortterm or is_threshold_mkt) else MIN_VOLUME_USD
                 if volume < min_vol:
+                    _mark_reason("low_volume")
                     continue
                 
+                _mark_reason("passed_primary_filters")
                 filtered.append(market)
 
             if SHORTTERM_NEAREST_CYCLE_ONLY and filtered:
@@ -1419,6 +1601,8 @@ class PolymarketBot:
                 nearest_by_bucket: Dict[str, tuple] = {}
                 kept_non_shortterm = []
                 shortterm_seen = 0
+                nearest_cycle_rejections: Dict[str, int] = {}
+                future_cycle_samples: Dict[str, List[str]] = {}
 
                 for market in filtered:
                     text = _market_text_payload(market)
@@ -1437,13 +1621,31 @@ class PolymarketBot:
 
                     end_ts = _parse_market_end_ts(market)
                     if end_ts is None:
+                        if self.ml_directional_lean_mode:
+                            nearest_cycle_rejections["missing_end_ts"] = nearest_cycle_rejections.get("missing_end_ts", 0) + 1
                         continue
 
                     remaining = end_ts - now_ts
                     if remaining < 0:
+                        if self.ml_directional_lean_mode:
+                            nearest_cycle_rejections["expired"] = nearest_cycle_rejections.get("expired", 0) + 1
                         continue
                     if shortterm_max_sec > 0 and remaining > shortterm_max_sec:
+                        if self.ml_directional_lean_mode:
+                            nearest_cycle_rejections["beyond_horizon"] = nearest_cycle_rejections.get("beyond_horizon", 0) + 1
                         continue
+
+                    bucket_cycle_end_ts = _current_cycle_end_ts(now_ts, bucket_horizon)
+                    cycle_grace_sec = 90
+                    if bucket_cycle_end_ts is not None and end_ts > (bucket_cycle_end_ts + cycle_grace_sec):
+                        if self.ml_directional_lean_mode:
+                            nearest_cycle_rejections["future_cycle"] = nearest_cycle_rejections.get("future_cycle", 0) + 1
+                            sample_slug = str(market.get("slug") or market.get("market_slug") or market.get("event_slug") or "")
+                            bucket_samples = future_cycle_samples.setdefault(bucket, [])
+                            if sample_slug and len(bucket_samples) < 3:
+                                bucket_samples.append(sample_slug)
+                        continue
+
                     shortterm_seen += 1
                     current = nearest_by_bucket.get(bucket)
                     if current is None or remaining < current[0]:
@@ -1452,7 +1654,7 @@ class PolymarketBot:
                 nearest_shortterm = [v[1] for v in nearest_by_bucket.values()]
                 filtered = kept_non_shortterm + nearest_shortterm
                 cprint(
-                    f"⏱️ Short-term nearest-cycle filter: {len(nearest_shortterm)} kept "
+                    f"Short-term nearest-cycle filter: {len(nearest_shortterm)} kept "
                     f"across {len(nearest_by_bucket)} buckets (from {shortterm_seen})",
                     "cyan",
                 )
@@ -1468,17 +1670,43 @@ class PolymarketBot:
                         for h in sorted(self.ml_directional_lean_horizons)
                     )
                     cprint(
-                        f"🪶 ML lean universe: {len(nearest_shortterm)} market(s) "
+                        f"Lean universe: {len(nearest_shortterm)} market(s) "
                         f"for {', '.join(sorted(self.ml_directional_lean_assets))} "
                         f"{', '.join(sorted(self.ml_directional_lean_horizons))}",
                         "cyan",
                     )
-                    cprint(f"   ↳ horizons: {horizon_summary or '—'}", "cyan")
+                    for market in nearest_shortterm:
+                        bucket = _shortterm_bucket_key(_market_text_payload(market))
+                        horizon = _extract_horizon_from_bucket(bucket)
+                        end_ts = _parse_market_end_ts(market)
+                        cycle_end_ts = _current_cycle_end_ts(now_ts, horizon)
+                        slug = str(market.get("slug") or market.get("market_slug") or market.get("event_slug") or "—")
+                        if bucket and horizon and end_ts is not None and cycle_end_ts is not None:
+                            cprint(
+                                f"selected {bucket}: slug={slug} end={int(end_ts)} cycle_end={int(cycle_end_ts)} lag={int(end_ts - cycle_end_ts)}s",
+                                "cyan",
+                            )
+                    cprint(f"horizons: {horizon_summary or '—'}", "cyan")
+                    if lean_candidate_counts:
+                        counts_summary = ", ".join(
+                            f"{key}={value}" for key, value in sorted(lean_candidate_counts.items())
+                        )
+                        cprint(f"lean candidate flow: {counts_summary}", "yellow")
+                    if nearest_cycle_rejections:
+                        rejection_summary = ", ".join(
+                            f"{key}={value}" for key, value in sorted(nearest_cycle_rejections.items())
+                        )
+                        cprint(f"nearest-cycle rejections: {rejection_summary}", "yellow")
+                    if future_cycle_samples:
+                        for bucket, samples in sorted(future_cycle_samples.items()):
+                            cprint(
+                                f"future-cycle samples [{bucket}]: {', '.join(samples)}",
+                                "yellow",
+                            )
                     if not nearest_shortterm and unmatched_btc_samples:
-                        cprint("   ↳ unmatched BTC-ish samples:", "yellow")
+                        cprint("unmatched BTC-ish samples:", "yellow")
                         for sample in unmatched_btc_samples:
                             cprint(
-                                "      "
                                 f"q={sample['question']!r} slug={sample['slug']!r} "
                                 f"event_title={sample['event_title']!r} event_slug={sample['event_slug']!r}",
                                 "yellow",
@@ -1493,12 +1721,15 @@ class PolymarketBot:
             if is_refresh:
                 self._refresh_feed_subscriptions(refreshed_markets)
                 self.markets = refreshed_markets
+                self._stale_shortterm_condition_ids.clear()
+                self._stale_shortterm_market_slugs.clear()
+                self._cancel_stale_shortterm_orders(refreshed_markets)
             else:
                 self.markets.update(refreshed_markets)
 
             market_type = "crypto" if ONLY_CRYPTO_MARKETS else "all"
             refresh_label = "Refreshed" if is_refresh else "Found"
-            cprint(f"✅ {refresh_label} {len(self.markets)} tradeable markets ({market_type})", "green")
+            cprint(f"{refresh_label} {len(self.markets)} tradeable markets ({market_type})", "green")
 
             # Subscribe to WebSocket for these markets
             token_ids = []
@@ -1517,7 +1748,7 @@ class PolymarketBot:
                 self.feed.subscribe(list(dict.fromkeys(token_ids))[:subscribe_limit])
 
         except Exception as e:
-            cprint(f"❌ Error fetching markets: {e}", "red")
+            cprint(f"Error fetching markets: {e}", "red")
 
     def _refresh_feed_subscriptions(self, refreshed_markets: Dict[str, Dict]) -> None:
         """Refresh WebSocket subscriptions for updated markets."""
@@ -1550,7 +1781,135 @@ class PolymarketBot:
             if tokens_to_subscribe:
                 self.feed.subscribe(tokens_to_subscribe[:subscribe_limit])
         except Exception as e:
-            cprint(f"❌ WebSocket subscription refresh failed: {e}", "red")
+            cprint(f"WebSocket subscription refresh failed: {e}", "red")
+
+    def _cancel_stale_shortterm_orders(self, refreshed_markets: Dict[str, Dict]) -> None:
+        """Cancel active short-term orders that are no longer in the current market universe."""
+        if not self.order_manager or not refreshed_markets:
+            return
+
+        current_token_ids = set()
+        current_condition_ids = set(refreshed_markets.keys())
+        current_market_slugs = set()
+
+        for market in refreshed_markets.values():
+            slug = str(market.get("slug") or market.get("market_slug") or market.get("event_slug") or "")
+            if slug:
+                current_market_slugs.add(slug)
+            for token in market.get("tokens", []) or []:
+                token_id = token.get("token_id")
+                if token_id:
+                    current_token_ids.add(str(token_id))
+            for tid in market.get("clobTokenIds", []) or []:
+                if isinstance(tid, str) and tid:
+                    current_token_ids.add(tid)
+                elif isinstance(tid, dict) and tid.get("token_id"):
+                    current_token_ids.add(str(tid["token_id"]))
+
+        cancelled = 0
+        for order in list(self.order_manager.get_active_orders()):
+            bucket = _shortterm_bucket_key(str(order.market_slug or ""))
+            if not bucket:
+                continue
+
+            condition_id = str((order.metadata or {}).get("condition_id") or "")
+            token_id = str(order.token_id or "")
+            market_slug = str(order.market_slug or "")
+            still_current = (
+                (condition_id and condition_id in current_condition_ids)
+                or (token_id and token_id in current_token_ids)
+                or (market_slug and market_slug in current_market_slugs)
+            )
+            if still_current:
+                continue
+
+            result = self.order_manager.cancel_order(order.order_id, "Short-term market rolled to new cycle")
+            if result.get("success"):
+                cancelled += 1
+
+        if cancelled:
+            cprint(f"Cancelled {cancelled} stale short-term order(s) after market refresh", "yellow")
+
+    def _shortterm_signal_stale_reason(self, signal) -> Optional[str]:
+        """Return a human-readable reason when a short-term signal should be blocked."""
+        market_slug = str(signal.market_slug or "")
+        bucket = _shortterm_bucket_key(market_slug)
+        horizon = _extract_horizon_from_bucket(bucket)
+        if not bucket or not horizon:
+            return None
+
+        current_bucket_slugs = {
+            str((market or {}).get("slug") or "")
+            for market in self.markets.values()
+            if _shortterm_bucket_key(_market_text_payload(market or {})) == bucket
+        }
+        current_bucket_slugs.discard("")
+
+        end_ts = signal.metadata.get("end_date_ts") if isinstance(signal.metadata, dict) else None
+        try:
+            end_ts = float(end_ts) if end_ts not in (None, "") else None
+        except (TypeError, ValueError):
+            end_ts = None
+        if end_ts is None:
+            end_ts = _parse_market_end_ts({"slug": market_slug})
+        if end_ts is None:
+            return None
+
+        now_ts = time.time()
+        min_seconds_remaining = {
+            "15m": ML_DIRECTIONAL_MIN_SECONDS_TO_EXPIRY_15M,
+            "1h": ML_DIRECTIONAL_MIN_SECONDS_TO_EXPIRY_1H,
+        }.get(horizon, 0)
+        remaining = end_ts - now_ts
+        if remaining < min_seconds_remaining:
+            return f"only {max(int(remaining), 0)}s left (< {min_seconds_remaining}s minimum)"
+
+        if current_bucket_slugs and market_slug not in current_bucket_slugs:
+            return "market rolled before execution"
+        return None
+
+    def _cancel_out_of_cycle_shortterm_orders(self) -> None:
+        """Cancel active short-term orders whose end time is not in the current live cycle."""
+        if not self.order_manager:
+            return
+
+        now_ts = time.time()
+        cycle_grace_sec = 90
+        cancelled = 0
+
+        for order in list(self.order_manager.get_active_orders()):
+            bucket = _shortterm_bucket_key(str(order.market_slug or ""))
+            horizon = _extract_horizon_from_bucket(bucket)
+            if not bucket or not horizon:
+                continue
+
+            metadata = order.metadata or {}
+            end_ts = metadata.get("end_date_ts")
+            try:
+                end_ts = float(end_ts) if end_ts not in (None, "") else None
+            except (TypeError, ValueError):
+                end_ts = None
+            if end_ts is None:
+                end_ts = _parse_market_end_ts({"slug": order.market_slug})
+            if end_ts is None:
+                continue
+
+            current_cycle_end_ts = _current_cycle_end_ts(now_ts, horizon)
+            if current_cycle_end_ts is None:
+                continue
+
+            if abs(end_ts - current_cycle_end_ts) <= cycle_grace_sec:
+                continue
+
+            result = self.order_manager.cancel_order(
+                order.order_id,
+                f"Short-term order outside current {bucket} cycle",
+            )
+            if result.get("success"):
+                cancelled += 1
+
+        if cancelled:
+            cprint(f"Cancelled {cancelled} out-of-cycle short-term order(s)", "yellow")
 
     def _refresh_balance(self, force_log: bool = False) -> None:
         """Fetch latest balance and update risk manager."""
@@ -1560,7 +1919,7 @@ class PolymarketBot:
             if balance is None:
                 if force_log:
                     cprint(
-                        f"⚠️  Balance unavailable from API (source={diagnostics.get('source', 'unknown')})",
+                        f"WARNING: Balance unavailable from API (source={diagnostics.get('source', 'unknown')})",
                         "yellow",
                     )
                 return
@@ -1569,18 +1928,18 @@ class PolymarketBot:
             self._last_balance_refresh_success_ts = time.time()
             if force_log:
                 label = "PAPER" if PAPER_TRADING else "LIVE"
-                cprint(f"💰 {label} balance: ${balance:.2f}", "white")
+                cprint(f"{label} balance: ${balance:.2f}", "white")
                 if not PAPER_TRADING and balance <= 0:
                     details = diagnostics.get("details", {}) or {}
                     proxy = str(details.get("proxy_address") or "")
                     proxy_short = f"{proxy[:6]}...{proxy[-4:]}" if len(proxy) >= 10 else proxy or "—"
                     cprint(
-                        f"⚠️  Live balance resolved to $0.00 (source={diagnostics.get('source', 'unknown')}, proxy={proxy_short}, sig={details.get('signature_type', '—')})",
+                        f"WARNING: Live balance resolved to $0.00 (source={diagnostics.get('source', 'unknown')}, proxy={proxy_short}, sig={details.get('signature_type', '—')})",
                         "yellow",
                     )
         except Exception as e:
             if force_log:
-                cprint(f"⚠️  Balance refresh failed: {e}", "yellow")
+                cprint(f"WARNING: Balance refresh failed: {e}", "yellow")
         
     def _on_orderbook_update(self, update):
         """Handle orderbook updates from WebSocket."""
@@ -1588,11 +1947,11 @@ class PolymarketBot:
     
     def _on_feed_connect(self):
         """Handle WebSocket connection."""
-        cprint("📡 WebSocket connected", "green")
+        cprint("WebSocket connected", "green")
     
     def _on_feed_disconnect(self, reason: str):
         """Handle WebSocket disconnection."""
-        cprint(f"📡 WebSocket disconnected: {reason}", "yellow")
+        cprint(f"WebSocket disconnected: {reason}", "yellow")
     
     def _check_for_fills(self):
         """Poll Polymarket for recent trades and detect fills."""

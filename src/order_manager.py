@@ -177,6 +177,53 @@ class OrderManager:
             self.total_orders_filled = sum(1 for o in self.orders.values() if o.status == OrderStatus.FILLED)
             self.total_orders_cancelled = sum(1 for o in self.orders.values() if o.status == OrderStatus.CANCELLED)
             cprint(f"📦 Loaded {len(self.orders)} persisted orders", "cyan")
+
+    @staticmethod
+    def _norm_id(value) -> str:
+        if not value:
+            return ""
+        return str(value).lower().replace("0x", "").strip()
+
+    def _trade_matches_order(self, order: Order, trade: Dict) -> bool:
+        token_id = trade.get("asset_id") or trade.get("token_id") or trade.get("asset")
+        side = (trade.get("side") or "").upper()
+        try:
+            price = float(trade.get("price", 0) or 0)
+        except (TypeError, ValueError):
+            price = 0.0
+        try:
+            size = float(trade.get("size", 0) or 0)
+        except (TypeError, ValueError):
+            size = 0.0
+
+        if not token_id or not side or price <= 0 or size <= 0:
+            return False
+
+        if self._norm_id(order.token_id) != self._norm_id(token_id):
+            return False
+        if (order.side or "").upper() != side:
+            return False
+        if abs(order.price - price) >= 0.02:
+            return False
+
+        remaining = max(order.remaining_size, 0.0)
+        if remaining > 0 and abs(remaining - size) < 0.5:
+            return True
+        if abs(order.size - size) < 0.5:
+            return True
+        if size <= remaining + 0.01:
+            return True
+        return False
+
+    def _best_trade_for_order(self, order: Order, trades: List[Dict]) -> Optional[Dict]:
+        candidates = [trade for trade in trades if self._trade_matches_order(order, trade)]
+        if not candidates:
+            return None
+        return min(
+            candidates,
+            key=lambda trade: abs(float(trade.get("size", 0) or 0) - max(order.remaining_size, 0.0))
+            + abs(float(trade.get("price", 0) or 0) - order.price) * 10,
+        )
     
     def on_fill(self, callback: Callable[[Order, Dict], None]):
         """Register callback for order fills."""
@@ -594,19 +641,13 @@ class OrderManager:
         try:
             exchange_orders = self.client.get_open_orders()
 
-            def _norm(oid) -> str:
-                if not oid:
-                    return ""
-                s = str(oid).lower().replace("0x", "").strip()
-                return s
-
             exchange_ids = set()
             for o in exchange_orders:
                 for k in ("id", "orderID", "order_id"):
                     v = o.get(k)
                     if v:
                         exchange_ids.add(str(v))
-                        exchange_ids.add(_norm(v))
+                        exchange_ids.add(self._norm_id(v))
             
             # Also fetch recent trades to distinguish fills from cancels
             recent_trades = []
@@ -629,21 +670,35 @@ class OrderManager:
 
             # Mark orders as filled/cancelled if not on exchange
             for order_id, order in self.orders.items():
-                norm = _norm(order_id)
+                norm = self._norm_id(order_id)
                 on_exchange = order_id in exchange_ids or norm in exchange_ids
                 if order.is_active and not on_exchange:
                     if PAPER_TRADING:
                         continue
 
                     has_fill = order_id in recent_trade_order_ids or norm in recent_trade_order_ids
+                    matched_trade = None if has_fill else self._best_trade_for_order(order, recent_trades)
                     if has_fill:
                         self.process_fill(order_id, {
                             "trade_id": f"sync_{order_id}",
                             "side": order.side,
                             "price": order.price,
                             "size": order.size,
+                            "token_id": order.token_id,
                         })
                         cprint(f"🔄 Synced FILL: {order}", "green")
+                    elif matched_trade:
+                        fill_size = float(matched_trade.get("size", 0) or 0)
+                        fill_price = float(matched_trade.get("price", order.price) or order.price)
+                        trade_id = matched_trade.get("id") or matched_trade.get("trade_id") or f"sync_{order_id}"
+                        self.process_fill(order_id, {
+                            "trade_id": trade_id,
+                            "side": (matched_trade.get("side") or order.side),
+                            "price": fill_price,
+                            "size": fill_size,
+                            "token_id": matched_trade.get("asset_id") or matched_trade.get("token_id") or matched_trade.get("asset") or order.token_id,
+                        })
+                        cprint(f"🔄 Synced FILL (heuristic): {order}", "green")
                     else:
                         # No matching trade → likely cancelled by exchange
                         order.status = OrderStatus.CANCELLED

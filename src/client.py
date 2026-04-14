@@ -177,12 +177,12 @@ class PolymarketClient:
         if not self.client or PAPER_TRADING:
             return False
         try:
-            cprint(f"🔑 Refreshing API credentials ({reason})...", "yellow")
+            cprint(f"Refreshing API credentials ({reason})...", "yellow")
             self.client.set_api_creds(self.client.create_or_derive_api_creds())
             self.api_creds_set = True
             return True
         except Exception as exc:
-            cprint(f"⚠️  API credential refresh failed ({reason}): {exc}", "yellow")
+            cprint(f"WARNING: API credential refresh failed ({reason}): {exc}", "yellow")
             return False
 
     def _start_heartbeat_loop(self) -> None:
@@ -206,7 +206,7 @@ class PolymarketClient:
                         self._heartbeat_running = False
                         return
                     else:
-                        cprint(f"⚠️  Heartbeat failed: {exc}", "yellow")
+                        cprint(f"WARNING: Heartbeat failed: {exc}", "yellow")
                 time.sleep(max(2.0, CLOB_HEARTBEAT_INTERVAL_SECONDS))
 
         self._heartbeat_thread = threading.Thread(target=_loop, daemon=True, name="clob-heartbeat")
@@ -241,7 +241,7 @@ class PolymarketClient:
                 continue
 
         if not self._heartbeat_warned_unavailable:
-            cprint("⚠️  Heartbeat endpoint unavailable on current API/SDK combination", "yellow")
+            cprint("WARNING: Heartbeat endpoint unavailable on current API/SDK combination", "yellow")
             self._heartbeat_warned_unavailable = True
         raise Exception("; ".join(errors) if errors else "heartbeat endpoint unavailable")
 
@@ -271,12 +271,12 @@ class PolymarketClient:
             )
 
             self.last_allowance_refresh = now
-            cprint(f"🔐 Refreshed CLOB allowance ({reason})", "cyan")
+            cprint(f"Refreshed CLOB allowance ({reason})", "cyan")
             if ALLOWANCE_DIAGNOSTICS_ENABLED:
                 self._log_allowance_diagnostics(f"after-refresh:{reason}", throttle_seconds=10)
             return True
         except Exception as exc:
-            cprint(f"⚠️  Allowance refresh failed ({reason}): {exc}", "yellow")
+            cprint(f"WARNING: Allowance refresh failed ({reason}): {exc}", "yellow")
             return False
 
     def _log_allowance_diagnostics(self, stage: str, throttle_seconds: int = 30) -> None:
@@ -301,13 +301,13 @@ class PolymarketClient:
                     if key in snapshot:
                         fields.append(f"{key}={snapshot.get(key)}")
                 if fields:
-                    cprint(f"🧪 Allowance diag [{stage}]: " + ", ".join(fields), "dark_grey")
+                    cprint(f"Allowance diag [{stage}]: " + ", ".join(fields), "dark_grey")
                 else:
-                    cprint(f"🧪 Allowance diag [{stage}]: {json.dumps(snapshot, separators=(',', ':'))[:240]}", "dark_grey")
+                    cprint(f"Allowance diag [{stage}]: {json.dumps(snapshot, separators=(',', ':'))[:240]}", "dark_grey")
             else:
-                cprint(f"🧪 Allowance diag [{stage}]: {str(snapshot)[:240]}", "dark_grey")
+                cprint(f"Allowance diag [{stage}]: {str(snapshot)[:240]}", "dark_grey")
         except Exception as exc:
-            cprint(f"⚠️  Allowance diag failed [{stage}]: {self._format_error(exc)}", "yellow")
+            cprint(f"WARNING: Allowance diag failed [{stage}]: {self._format_error(exc)}", "yellow")
         
     def connect(self) -> bool:
         """
@@ -317,15 +317,15 @@ class PolymarketClient:
             True if connected successfully
         """
         if not CLOB_AVAILABLE:
-            cprint("❌ Cannot connect: py-clob-client not installed", "red")
+            cprint("Cannot connect: py-clob-client not installed", "red")
             return False
         
         if not PRIVATE_KEY or not PROXY_ADDRESS:
-            cprint("❌ Cannot connect: Missing PRIVATE_KEY or PROXY_ADDRESS in .env", "red")
+            cprint("Cannot connect: Missing PRIVATE_KEY or PROXY_ADDRESS in .env", "red")
             return False
         
         try:
-            cprint("🔌 Connecting to Polymarket CLOB...", "cyan")
+            cprint("Connecting to Polymarket CLOB...", "cyan")
             
             self.client = ClobClient(
                 host=CLOB_HOST,
@@ -336,19 +336,19 @@ class PolymarketClient:
             )
             
             # Derive API credentials
-            cprint("🔑 Setting up API credentials...", "cyan")
+            cprint("Setting up API credentials...", "cyan")
             self.client.set_api_creds(self.client.create_or_derive_api_creds())
             self.api_creds_set = True
             self._refresh_allowance(force=True, reason="startup")
             
             self.is_connected = True
             self._start_heartbeat_loop()
-            cprint("✅ Connected to Polymarket CLOB", "green")
+            cprint("Connected to Polymarket CLOB", "green")
             
             return True
             
         except Exception as e:
-            cprint(f"❌ Connection failed: {e}", "red")
+            cprint(f"Connection failed: {e}", "red")
             self.is_connected = False
             return False
     
@@ -394,7 +394,7 @@ class PolymarketClient:
                 if transient:
                     delay = max(1.0, delay * 2)
                 jitter = delay * 0.1 * random.random()
-                cprint(f"⚠️  {action} failed (attempt {attempt}/{max_attempts}): {msg}", "yellow")
+                cprint(f"WARNING: {action} failed (attempt {attempt}/{max_attempts}): {msg}", "yellow")
                 time.sleep(delay + jitter)
         if last_error:
             raise last_error
@@ -419,13 +419,16 @@ class PolymarketClient:
             
             url = f"{GAMMA_HOST}/markets"
             all_markets: list = []
-            cursor = next_cursor
+            start_offset = int(next_cursor) if str(next_cursor).strip() else 0
             page_cap = max_pages or 10
 
-            for _ in range(page_cap):
-                params = {"closed": "false", "limit": 100}
-                if cursor:
-                    params["next_cursor"] = cursor
+            for page_idx in range(page_cap):
+                params = {
+                    "closed": "false",
+                    "active": "true",
+                    "limit": 100,
+                    "offset": start_offset + (page_idx * 100),
+                }
                 if tag:
                     params["tag"] = tag
 
@@ -438,13 +441,13 @@ class PolymarketClient:
 
                 if isinstance(result, list):
                     all_markets.extend(result)
-                    break  # no pagination info — single page
+                    if len(result) < 100:
+                        break
                 elif isinstance(result, dict):
                     data = result.get("data", result.get("markets", []))
                     if isinstance(data, list):
                         all_markets.extend(data)
-                    cursor = result.get("next_cursor", "")
-                    if not cursor:
+                    if not isinstance(data, list) or len(data) < 100:
                         break
                 else:
                     break
@@ -452,9 +455,44 @@ class PolymarketClient:
             return all_markets
             
         except Exception as e:
-            cprint(f"❌ Failed to fetch markets: {e}", "red")
+            cprint(f"Failed to fetch markets: {e}", "red")
             return {"error": str(e)}
-    
+
+    def get_markets_page(self, next_cursor: str = "", tag: str = "") -> Dict[str, Any]:
+        """Fetch a single /markets page using offset pagination metadata."""
+        if not self.is_connected:
+            return {"error": "Not connected"}
+
+        try:
+            import requests
+
+            url = f"{GAMMA_HOST}/markets"
+            current_offset = int(next_cursor) if str(next_cursor).strip() else 0
+            params = {"closed": "false", "active": "true", "limit": 100, "offset": current_offset}
+            if tag:
+                params["tag"] = tag
+
+            def _request(p=dict(params)):
+                response = requests.get(url, params=p, timeout=30)
+                response.raise_for_status()
+                return response.json()
+
+            result = self._retry_call(_request, "Fetch markets page")
+            if isinstance(result, list):
+                next_offset = current_offset + len(result) if len(result) == 100 else ""
+                return {"data": result, "next_cursor": str(next_offset) if next_offset != "" else ""}
+            if isinstance(result, dict):
+                data = result.get("data", result.get("markets", []))
+                next_offset = current_offset + len(data) if isinstance(data, list) and len(data) == 100 else ""
+                return {
+                    "data": data if isinstance(data, list) else [],
+                    "next_cursor": str(next_offset) if next_offset != "" else "",
+                }
+            return {"data": [], "next_cursor": ""}
+        except Exception as e:
+            cprint(f"Failed to fetch markets page: {e}", "red")
+            return {"error": str(e)}
+
     def get_events(self, limit: int = 50, max_pages: Optional[int] = None, offset: int = 0) -> List[Dict]:
         """
         Fetch active events from Gamma API (includes 5-min crypto markets).
@@ -498,21 +536,21 @@ class PolymarketClient:
                         break
                 if len(result) < limit:
                     break
-                offset += limit
+                current_offset += limit
 
             return all_events
             
         except Exception as e:
-            cprint(f"⚠️ Failed to fetch events: {e}", "yellow")
+            cprint(f"Failed to fetch events: {e}", "yellow")
             return []
 
     def get_market(self, condition_id: str) -> Optional[Dict]:
         """
-        Get details for a specific market.
-        
+        Fetch market by condition ID if supported.
+
         Args:
             condition_id: The market's condition ID
-            
+
         Returns:
             Market details dict or None
         """
@@ -532,7 +570,7 @@ class PolymarketClient:
             return self._retry_call(_request, f"Fetch market {condition_id}")
             
         except Exception as e:
-            cprint(f"❌ Failed to fetch market {condition_id}: {e}", "red")
+            cprint(f"Failed to fetch market {condition_id}: {e}", "red")
             return None
     
     def get_orderbook(self, token_id: str) -> Optional[Dict]:
@@ -555,7 +593,7 @@ class PolymarketClient:
             )
             
         except Exception as e:
-            cprint(f"❌ Failed to fetch orderbook: {e}", "red")
+            cprint(f"Failed to fetch orderbook: {e}", "red")
             return None
     
     def get_price(self, token_id: str) -> Optional[Dict]:
@@ -628,7 +666,7 @@ class PolymarketClient:
         
         # Paper trading mode
         if PAPER_TRADING:
-            cprint(f"📝 [PAPER] {side} {size:.2f} @ ${price:.3f}", "yellow")
+            cprint(f"[PAPER] {side} {size:.2f} @ ${price:.3f}", "yellow")
             return {
                 "success": True,
                 "order_id": f"paper_{int(time.time()*1000)}",
@@ -665,7 +703,7 @@ class PolymarketClient:
                 "Post order",
             )
             
-            cprint(f"✅ Order placed: {side} {size:.2f} @ ${price:.3f}", "green")
+            cprint(f"Order placed: {side} {size:.2f} @ ${price:.3f}", "green")
             
             return {
                 "success": True,
@@ -677,7 +715,7 @@ class PolymarketClient:
             error_msg = self._format_error(e)
             if self._is_allowance_error(error_msg):
                 self._log_allowance_diagnostics("order-error:before-refresh", throttle_seconds=10)
-                cprint("🔁 Allowance error detected, forcing allowance refresh and retrying once...", "yellow")
+                cprint("Allowance error detected, forcing allowance refresh and retrying once...", "yellow")
                 refreshed = self._refresh_allowance(force=True, reason="order-error")
                 if refreshed:
                     self._log_allowance_diagnostics("order-error:after-refresh", throttle_seconds=0)
@@ -698,7 +736,7 @@ class PolymarketClient:
                             lambda: self.client.post_order(signed_order, ot),
                             "Post order",
                         )
-                        cprint(f"✅ Order placed after allowance refresh: {side} {size:.2f} @ ${price:.3f}", "green")
+                        cprint(f"Order placed after allowance refresh: {side} {size:.2f} @ ${price:.3f}", "green")
                         return {
                             "success": True,
                             "order_id": result.get("orderID") or result.get("id"),
@@ -706,7 +744,7 @@ class PolymarketClient:
                         }
                     except Exception as retry_exc:
                         error_msg = self._format_error(retry_exc)
-            cprint(f"❌ Order failed: {error_msg}", "red")
+            cprint(f"Order failed: {error_msg}", "red")
             
             return {
                 "success": False,

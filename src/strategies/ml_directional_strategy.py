@@ -269,7 +269,10 @@ class MLDirectionalStrategy(BaseStrategy):
                         }
                     if horizon in self._horizon_trade_counts:
                         self._horizon_trade_counts[horizon] += 1
-                    cprint(f"  ✅ ML directional order placed: {result.get('order_id')}", "green")
+                    cprint(
+                        f"ML directional order placed: {signal.market_slug} | {result.get('order_id')}",
+                        "green",
+                    )
                 else:
                     cprint(f"  ❌ ML directional order failed: {result.get('error')}", "red")
                 results.append(result)

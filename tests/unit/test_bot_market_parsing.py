@@ -58,6 +58,16 @@ def test_parse_market_end_ts_uses_event_metadata_when_submarket_missing_times():
     assert parsed > 0
 
 
+def test_parse_market_end_ts_prefers_slug_timestamp_for_shortterm_markets_over_event_date():
+    market = {
+        "question": "BTC Up or Down - 15 Minutes",
+        "slug": "btc-updown-15m-1776093300",
+        "event_end_date": "2026-04-14T11:00:00Z",
+    }
+
+    assert _parse_market_end_ts(market) == 1776093300.0
+
+
 def test_parse_market_end_ts_falls_back_to_slug_timestamp():
     market = {
         "event_slug": "btc-updown-1h-1772406000",
