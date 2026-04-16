@@ -18,12 +18,14 @@ An institutional-grade algorithmic trading platform for Polymarket prediction ma
 - **13 Trading Strategies** — from wallet-copy to ML-driven directional edge
 - **Binance BTC Feed** — real-time VWAP, volatility, and price velocity for 5-min BTC markets
 - **Adaptive Risk Manager** — bankroll-proportional limits, drawdown throttling, portfolio Greeks monitoring, pre-trade shock testing, auto-halt
+- **Authenticated User WebSocket** — near-real-time order and trade lifecycle updates in live mode, with REST sync fallback
 - **Multi-Wallet Profiles** — run CHR/BB/etc. concurrently from one shared config file
 - **Strategy Analytics** — per-strategy P&L, Sharpe ratio, win rate, streaks, auto-disable losers
 - **Telegram Alerts** — fills, risk events, Greeks threshold alerts, daily summaries
 - **Inventory-Aware Kelly Sizing** — position sizes shrink as existing inventory grows, preventing over-concentration
 - **Paper Trading** — full simulation mode, zero risk
 - **Order Lifecycle** — tracking, duplicate prevention, stale cleanup, graceful shutdown cancellation
+- **Live TUI Execution View** — execution health, open orders, recent fills, and live open-position unrealized PnL
 - **Wallet Analysis** — reverse-engineer tracked wallets to infer strategies (markets, sizing, horizons)
 - **Backtesting** — PolyBackTest API integration for historical 5m/15m Up/Down markets; replay strategies like terminal_convergence
 - **Offline ML Pipeline** — `src/ml/` package for OHLCV loading, feature engineering (ATR, momentum, EMA/SMA distances/slopes, RSI, volume z-score), walk-forward training with LightGBM, artifact export, and dedicated replay backtests
@@ -342,6 +344,7 @@ Model-driven directional trading for 15m and 1h BTC Up/Down markets:
 - Runtime feature parity: `BinanceFeed.get_recent_ohlcv()` + `FeatureBuilder.build_training_schema_runtime_row()` — no training/inference gap
 - Safety: rolling accuracy/Brier halts, feed-staleness halts, per-market signal cooldowns
 - **Lean mode** (`ML_DIRECTIONAL_LEAN_MODE=true`) restricts scanning to BTC-only crypto markets
+- Lean mode also narrows Binance symbols at feed construction time, and can be reused by single-strategy `terminal_convergence` runs for faster startup
 - Profile configs: `config/settings.chr.ml_paper.env` (paper), `config/settings.chr.ml_live.env` (live)
 - Docs: [ML Directional Edge](docs/strategies/ml-directional-edge/README.md)
 - Checklist: [Implementation Checklist](docs/strategies/ml-directional-edge/IMPLEMENTATION_CHECKLIST.md)
@@ -415,9 +418,15 @@ See [docs/backtesting/](docs/backtesting/) for full documentation.
 - **`not enough balance / allowance` while TUI balance looks high**:
   - This usually means low **spendable collateral**, not low total portfolio value.
   - Enable `ALLOWANCE_DIAGNOSTICS_ENABLED=true` to log allowance snapshots.
+- **`AttributeError ... tick_size` during live order placement**:
+  - The client now builds typed `PartialCreateOrderOptions` for the current `py-clob-client`.
+  - If this returns after an SDK upgrade, re-check the installed `create_order()` signature before trading live.
 - **Repeated 401 on fill checks**:
   - Credential refresh is automatic, but network/latency can still slow loops.
   - Tune `TRADE_FETCH_TIMEOUT_SECONDS` and `BALANCE_FETCH_TIMEOUT_SECONDS`.
+- **User WebSocket JSON parse noise (`Expecting value`)**:
+  - The user stream now ignores blank / heartbeat frames such as `PING`, `PONG`, and `{}`.
+  - If repeated parse errors continue, capture the raw frame payload before changing trading logic.
 - **Adaptive risk with stale balance**:
   - With `BALANCE_STALE_BLOCK_BUYS=true`, new BUYs are blocked if balance is stale too long.
   - This prevents oversizing on outdated balance data.
@@ -478,11 +487,25 @@ When enabled, all risk limits scale dynamically with your balance:
 ### Order Management
 
 - Full lifecycle: PENDING → OPEN → PARTIAL → FILLED / CANCELLED
+- Live mode prefers the authenticated user WebSocket for order/trade reconciliation, then falls back to REST polling + exchange sync
 - SQLite persistence (survives restarts)
 - Duplicate prevention (won't double-order same token+side)
 - Stale order auto-cleanup after timeout
 - Graceful shutdown cancels all active orders
 - Exchange sync distinguishes fills from cancels
+- Per-order metadata persists `post_only`, `fee_rate_bps`, and expiration so fill accounting stays aligned with live execution
+
+### TUI Dashboard
+
+The live dashboard now exposes execution and position state that matters in production:
+- **Execution Health** — market WS, user WS, Binance connectivity, event freshness, balance/positions staleness
+- **Open Positions** — entry, mark, size, unrealized PnL, and PnL %
+- **Open Orders / Recent Fills** — current working orders and latest confirmed fills
+- **Portfolio** — session PnL plus live unrealized PnL
+
+Open-position PnL is mark-to-market from the latest live market data:
+- mid-price when real quotes are available
+- otherwise last traded price as fallback
 
 ## Project Structure
 
@@ -515,8 +538,8 @@ polymarket-bot/
 │   ├── order_manager.py          # Order lifecycle
 │   ├── risk_manager.py           # Adaptive risk + portfolio Greeks + shock testing
 │   ├── persistence.py            # SQLite state store
-│   ├── dashboard.py              # TUI with Risk Engine panel
-│   ├── websocket_feed.py         # Polymarket WebSocket
+│   ├── dashboard.py              # TUI with Risk Engine, execution, and open-position PnL panels
+│   ├── websocket_feed.py         # Polymarket market + authenticated user WebSockets
 │   ├── logging_utils.py          # Colored console output
 │   ├── native/                   # bs-p FFI bridge
 │   │   ├── __init__.py
@@ -658,4 +681,3 @@ python -m src.bot --strategy my_strategy
 ## License
 
 MIT - Use at your own risk.
-

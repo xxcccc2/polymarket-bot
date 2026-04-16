@@ -91,6 +91,7 @@ class PortfolioSnapshot:
     exposure: float = 0.0
     exposure_pct: float = 0.0
     daily_pnl: float = 0.0
+    unrealized_pnl: float = 0.0
     positions: int = 0
     active_orders: int = 0
     max_orders: int = 10
@@ -144,6 +145,17 @@ class OpenOrderRow:
 
 
 @dataclass
+class OpenPositionRow:
+    market: str = ""
+    outcome: str = ""
+    entry: float = 0.0
+    mark: float = 0.0
+    size: float = 0.0
+    unrealized_pnl: float = 0.0
+    pnl_pct: float = 0.0
+
+
+@dataclass
 class RecentFillRow:
     strategy: str = ""
     market: str = ""
@@ -185,6 +197,7 @@ class DashboardState:
     portfolio: PortfolioSnapshot = field(default_factory=PortfolioSnapshot)
     execution_health: ExecutionHealthSnapshot = field(default_factory=ExecutionHealthSnapshot)
     market_quality: MarketQualitySnapshot = field(default_factory=MarketQualitySnapshot)
+    open_positions: List[OpenPositionRow] = field(default_factory=list)
     open_orders: List[OpenOrderRow] = field(default_factory=list)
     recent_fills: List[RecentFillRow] = field(default_factory=list)
     strategy_details: List[StrategyDetailRow] = field(default_factory=list)
@@ -258,6 +271,7 @@ class Dashboard:
             ),
             self._render_strategies(s.strategies),
             self._render_strategy_details(s.strategy_details),
+            self._render_open_positions(s.open_positions),
             Columns(
                 [self._render_open_orders(s.open_orders), self._render_recent_fills(s.recent_fills)],
                 equal=True,
@@ -307,12 +321,14 @@ class Dashboard:
     def _render_portfolio(p: PortfolioSnapshot) -> Panel:
         session_pnl = p.balance - p.start_balance
         session_style = "green" if session_pnl >= 0 else "red"
+        unrealized_style = "green" if p.unrealized_pnl >= 0 else "red"
 
         lines = [
             f"Balance  [bold]${p.balance:,.2f}[/] ([{session_style}]{session_pnl:+.2f}[/])",
             f"Exposure ${p.exposure:,.2f} ({p.exposure_pct:.1f}%)  |  Pos {p.positions}",
             f"Orders   {p.active_orders}/{p.max_orders}  |  Fill {p.filled} ({p.fill_rate:.0f}%)",
             f"Daily PnL [{session_style}]{p.daily_pnl:+.2f}[/]  |  Bal age {Dashboard._fmt_age(p.balance_age_seconds)}",
+            f"U-PnL   [{unrealized_style}]{p.unrealized_pnl:+.2f}[/]",
         ]
 
         if p.throttle < 1.0:
@@ -434,6 +450,32 @@ class Dashboard:
                 row.partial_fill or row.status or "—",
             )
         return Panel(table, title="Open Orders", border_style="yellow", box=box.ROUNDED)
+
+    @staticmethod
+    def _render_open_positions(rows: List[OpenPositionRow]) -> Panel:
+        table = Table(box=box.SIMPLE_HEAVY, expand=True, show_edge=False, padding=(0, 1))
+        table.add_column("Market", ratio=4)
+        table.add_column("Out", ratio=1)
+        table.add_column("Entry", justify="right", ratio=1)
+        table.add_column("Mark", justify="right", ratio=1)
+        table.add_column("Size", justify="right", ratio=1)
+        table.add_column("U-PnL", justify="right", ratio=1)
+        table.add_column("PnL %", justify="right", ratio=1)
+        if not rows:
+            table.add_row("No open positions", "—", "—", "—", "—", "—", "—")
+        for row in rows[:8]:
+            pnl_style = "green" if row.unrealized_pnl >= 0 else "red"
+            pct_style = "green" if row.pnl_pct >= 0 else "red"
+            table.add_row(
+                row.market or "—",
+                row.outcome or "—",
+                f"{row.entry:.3f}" if row.entry > 0 else "—",
+                f"{row.mark:.3f}" if row.mark > 0 else "—",
+                f"{row.size:.2f}" if row.size > 0 else "—",
+                f"[{pnl_style}]{row.unrealized_pnl:+.2f}[/]",
+                f"[{pct_style}]{row.pnl_pct:+.1f}%[/]",
+            )
+        return Panel(table, title="Open Positions", border_style="bright_green", box=box.ROUNDED)
 
     @staticmethod
     def _render_recent_fills(rows: List[RecentFillRow]) -> Panel:

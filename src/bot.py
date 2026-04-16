@@ -23,7 +23,7 @@ from .logging_utils import cprint, set_dashboard_mode
 from .dashboard import (
     Dashboard, DashboardState, BinanceSnapshot,
     StrategyRow, PortfolioSnapshot, ExecutionHealthSnapshot,
-    MarketQualitySnapshot, OpenOrderRow, RecentFillRow, StrategyDetailRow, log as dash_log,
+    MarketQualitySnapshot, OpenOrderRow, OpenPositionRow, RecentFillRow, StrategyDetailRow, log as dash_log,
 )
 from .config import (
     SCAN_INTERVAL_SECONDS,
@@ -775,6 +775,7 @@ class PolymarketBot:
             self._first_scan_done = True
             self._log_market_diagnostics(market_data_list)
         self._latest_market_data = list(market_data_list)
+        self._update_live_position_marks(market_data_list)
         
         # Show adaptive risk state (only log if throttled — that's important)
         if self.risk_manager.adaptive_enabled:
@@ -1042,6 +1043,7 @@ class PolymarketBot:
         # Portfolio snapshot
         rm = self.risk_manager
         active_orders = 0
+        open_position_rows: List[OpenPositionRow] = []
         open_order_rows: List[OpenOrderRow] = []
         om_filled = 0
         om_cancelled = 0
@@ -1075,6 +1077,20 @@ class PolymarketBot:
         
         total_exp = rm.get_total_exposure()
         rm_status = rm.get_status()
+        for position in sorted(rm.positions.values(), key=lambda item: abs(item.unrealized_pnl), reverse=True)[:8]:
+            cost_basis = float(position.cost_basis or 0.0)
+            pnl_pct = (position.unrealized_pnl / cost_basis * 100.0) if cost_basis > 0 else 0.0
+            open_position_rows.append(
+                OpenPositionRow(
+                    market=position.market_slug,
+                    outcome=position.side,
+                    entry=position.avg_price,
+                    mark=position.current_price,
+                    size=position.size,
+                    unrealized_pnl=position.unrealized_pnl,
+                    pnl_pct=pnl_pct,
+                )
+            )
         balance_age = time.time() - self._last_balance_refresh_success_ts if self._last_balance_refresh_success_ts > 0 else 0.0
         portfolio = PortfolioSnapshot(
             balance=rm.current_balance,
@@ -1082,6 +1098,7 @@ class PolymarketBot:
             exposure=total_exp,
             exposure_pct=(total_exp / rm.current_balance * 100) if rm.current_balance > 0 else 0,
             daily_pnl=rm_status.get('daily_pnl', 0.0),
+            unrealized_pnl=rm_status.get('unrealized_pnl', 0.0),
             positions=len(rm.positions),
             active_orders=active_orders,
             max_orders=max_orders,
@@ -1164,12 +1181,23 @@ class PolymarketBot:
             portfolio=portfolio,
             execution_health=execution_health,
             market_quality=market_quality,
+            open_positions=open_position_rows,
             open_orders=open_order_rows,
             recent_fills=recent_fill_rows,
             strategy_details=strategy_details,
             risk_engine=re_snap,
         )
         self.dashboard.update(state)
+
+    def _update_live_position_marks(self, market_data_list: List[MarketData]) -> None:
+        prices: Dict[str, float] = {}
+        for data in market_data_list:
+            if getattr(data, "has_real_quotes", False) and data.mid_price > 0:
+                prices[data.token_id] = float(data.mid_price)
+            elif data.last_price > 0:
+                prices[data.token_id] = float(data.last_price)
+        if prices:
+            self.risk_manager.update_prices(prices)
 
     def _strategy_detail_row(self, name: str, state: Dict) -> StrategyDetailRow:
         eligible_counts = self._priority_strategy_eligibility()

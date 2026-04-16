@@ -636,7 +636,7 @@ class UserWebSocketFeed:
     def _on_message(self, ws, message: str):
         try:
             text = (message or "").strip()
-            if text.upper() == "PONG" or text == "{}":
+            if not text or text.upper() in {"PONG", "PING"} or text == "{}":
                 self.last_message_time = datetime.now()
                 return
             self.messages_received += 1

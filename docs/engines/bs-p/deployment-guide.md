@@ -74,6 +74,8 @@ The `PAPER_TRADING=true` env var overrides the config file value.
 In the TUI dashboard:
 - **Risk Engine panel** should show `Engine: NATIVE`
 - **Portfolio Delta/Gamma** should stay near zero with few positions
+- **Execution Health** should show both market/user WebSockets healthy in live mode
+- **Open Positions** should show mark-to-market unrealized PnL for active positions
 - **Strategy rows**: `spread` and `orderbook_imbalance` should show signals
 
 In Telegram:
@@ -223,6 +225,8 @@ a bug — it means you're long or short a cluster of correlated markets.
 □ Review shock test rejection rate (>50% = params too tight)
 □ Check Kelly inventory scale on largest positions
 □ Verify no "Balance stale" warnings blocking buys
+□ Verify user WebSocket is healthy and not spamming parse errors
+□ Check open-position unrealized PnL against expected live marks
 □ Review fill rate — are A-S quotes getting filled?
 ```
 

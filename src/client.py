@@ -71,6 +71,7 @@ try:
         OrderArgs,
         OrderType,
         PostOrdersArgs,
+        PartialCreateOrderOptions,
         BalanceAllowanceParams,
         AssetType,
         TradeParams,
@@ -405,6 +406,8 @@ class PolymarketClient:
         """Resolve per-market options required by the current Polymarket SDK."""
         cached = self._market_meta_cache.get(token_id)
         if cached:
+            if "PartialCreateOrderOptions" in globals():
+                return PartialCreateOrderOptions(tick_size=cached[0], neg_risk=cached[1])
             return {"tick_size": cached[0], "neg_risk": cached[1]}
 
         if not self.client:
@@ -422,6 +425,8 @@ class PolymarketClient:
             if tick_size:
                 resolved = (str(tick_size), bool(neg_risk))
                 self._market_meta_cache[token_id] = resolved
+                if "PartialCreateOrderOptions" in globals():
+                    return PartialCreateOrderOptions(tick_size=resolved[0], neg_risk=resolved[1])
                 return {"tick_size": resolved[0], "neg_risk": resolved[1]}
         except Exception as exc:
             cprint(

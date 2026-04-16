@@ -237,7 +237,19 @@ Do this after a baseline artifact exists. It is safe to defer replay until train
 - Micro-trained artifacts are intentionally blocked live until true `micro_*` runtime parity exists.
 - Safety rails include feed staleness halts, rolling accuracy / Brier monitoring, and automatic pauses after loss streaks.
 - The strategy now suppresses both-side exposure on the same `condition_id` while an order or unresolved position is active.
+- Live order / fill reconciliation now prefers the authenticated Polymarket user WebSocket and falls back to REST/exchange sync.
+- The TUI now shows live open-position mark, unrealized PnL, and PnL % for filled ML positions.
 - Resolution tracking is still conservative: it works only when the market is still observable after expiry, so do not treat rolling paper metrics as final audit-grade stats yet.
+
+## Lean Mode Notes
+
+Lean mode is intended for low-latency single-strategy runs:
+
+- It narrows the market universe to the configured BTC short-term buckets
+- It narrows the Binance feed to the configured lean symbols at construction time
+- It is appropriate for `ml_directional` live runs and also for single-strategy `terminal_convergence` runs when you want faster startup and less market-fetch overhead
+
+Operationally, lean mode is only as good as the current Gamma event naming. If Polymarket changes short-term market slugs or titles, re-check bucket matching before live deployment.
 
 ## Collector Status And Sanity Checks
 
