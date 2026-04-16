@@ -65,7 +65,8 @@ def test_parse_market_end_ts_prefers_slug_timestamp_for_shortterm_markets_over_e
         "event_end_date": "2026-04-14T11:00:00Z",
     }
 
-    assert _parse_market_end_ts(market) == 1776093300.0
+    # Slug unix is window start; resolution/end is start + 15m.
+    assert _parse_market_end_ts(market) == 1776093300.0 + 15 * 60
 
 
 def test_parse_market_end_ts_falls_back_to_slug_timestamp():
@@ -73,7 +74,7 @@ def test_parse_market_end_ts_falls_back_to_slug_timestamp():
         "event_slug": "btc-updown-1h-1772406000",
     }
 
-    assert _parse_market_end_ts(market) == 1772406000.0
+    assert _parse_market_end_ts(market) == 1772406000.0 + 60 * 60
 
 
 def test_extract_asset_from_bucket_returns_asset_prefix():

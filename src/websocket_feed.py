@@ -26,6 +26,18 @@ WS_MARKET = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 WS_USER = "wss://ws-subscriptions-clob.polymarket.com/ws/user"
 
 
+def _normalize_ws_message_text(message) -> str:
+    """Decode WebSocket frames to str. websocket-client may pass str or bytes."""
+    if message is None:
+        return ""
+    if isinstance(message, bytes):
+        return message.decode("utf-8", errors="replace").strip().lstrip("\ufeff")
+    if isinstance(message, (bytearray, memoryview)):
+        return bytes(message).decode("utf-8", errors="replace").strip().lstrip("\ufeff")
+    s = str(message).strip()
+    return s.lstrip("\ufeff")
+
+
 @dataclass
 class OrderbookUpdate:
     """Represents an orderbook update."""
@@ -633,15 +645,19 @@ class UserWebSocketFeed:
         self._start_heartbeat()
         cprint("✅ User WebSocket connected!", "green")
 
-    def _on_message(self, ws, message: str):
+    def _on_message(self, ws, message):
         try:
-            text = (message or "").strip()
+            text = _normalize_ws_message_text(message)
             if not text or text.upper() in {"PONG", "PING"} or text == "{}":
+                self.last_message_time = datetime.now()
+                return
+            try:
+                raw = json.loads(text)
+            except json.JSONDecodeError:
                 self.last_message_time = datetime.now()
                 return
             self.messages_received += 1
             self.last_message_time = datetime.now()
-            raw = json.loads(message)
             payloads = raw if isinstance(raw, list) else [raw]
             for data in payloads:
                 if not isinstance(data, dict):

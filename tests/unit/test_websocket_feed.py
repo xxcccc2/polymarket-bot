@@ -52,6 +52,31 @@ def test_user_feed_subscription_includes_markets():
     assert feed.ws.messages[0]["markets"] == ["cond-1", "cond-2"]
 
 
+def test_user_feed_ignores_bytes_pong_without_json_error():
+    feed = UserWebSocketFeed(lambda: {"apiKey": "k"}, lambda: ["cond-1"])
+    before = feed.messages_received
+    feed._on_message(None, b"PONG")
+    assert feed.messages_received == before
+
+
+def test_user_feed_ignores_non_json_without_error():
+    feed = UserWebSocketFeed(lambda: {"apiKey": "k"}, lambda: ["cond-1"])
+    before = feed.messages_received
+    feed._on_message(None, " ")
+    feed._on_message(None, "not-json")
+    assert feed.messages_received == before
+
+
+def test_user_feed_parses_json_from_utf8_bytes():
+    feed = UserWebSocketFeed(lambda: {"apiKey": "k"}, lambda: ["cond-1"])
+    received = []
+    feed.on_order(lambda u: received.append(u))
+    payload = {"event_type": "order", "id": "oid", "status": "open"}
+    feed._on_message(None, json.dumps(payload).encode("utf-8"))
+    assert len(received) == 1
+    assert received[0].order_id == "oid"
+
+
 def test_user_feed_open_authenticates_then_subscribes():
     feed = UserWebSocketFeed(lambda: {"apiKey": "k", "secret": "s", "passphrase": "p"}, lambda: ["cond-1"])
     feed.ws = DummyWS()

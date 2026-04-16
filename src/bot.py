@@ -180,7 +180,14 @@ def _parse_market_end_ts(market: Dict) -> Optional[float]:
             if len(parts) == 2 and parts[1].isdigit():
                 bucket = _shortterm_bucket_key(f"{shortterm_text} {slug}")
                 horizon = _extract_horizon_from_bucket(bucket)
+                # Slug trailing int is the window *start* (e.g. btc-updown-15m-<unix>).
+                # Nearest-cycle filtering compares this to _current_cycle_end_ts(); using
+                # start as "end" makes the *next* window look like it ends at the same
+                # instant as the current cycle and slip through as "current".
+                duration_seconds = _bucket_duration_seconds(horizon)
                 anchor_ts = float(parts[1])
+                if duration_seconds:
+                    return anchor_ts + duration_seconds
                 return anchor_ts
 
     keys = (
@@ -1266,28 +1273,7 @@ class PolymarketBot:
     
     def _parse_market_end_ts(self, m: dict) -> Optional[float]:
         """Parse market end/resolution timestamp. Returns Unix sec or None."""
-        for key in ("endDate", "end_date", "end_date_iso", "closeTime", "resolutionDate"):
-            val = m.get(key)
-            if not val:
-                continue
-            if isinstance(val, (int, float)):
-                v = float(val)
-                if v > 1e12:
-                    return v / 1000
-                if v > 1e9:
-                    return v
-                return None
-            if isinstance(val, str):
-                try:
-                    parsed = datetime.fromisoformat(val.replace("Z", "+00:00"))
-                    return parsed.timestamp()
-                except Exception:
-                    pass
-        slug = m.get("slug", "")
-        parts = slug.rsplit("-", 1)
-        if len(parts) == 2 and parts[1].isdigit():
-            return float(parts[1])
-        return None
+        return _parse_market_end_ts(m)
 
     def _build_market_data(self) -> List[MarketData]:
         """Build MarketData objects from cached data."""
