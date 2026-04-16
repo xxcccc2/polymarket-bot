@@ -241,7 +241,10 @@ class OrderManager:
         size: float,
         order_type: str = "GTC",
         market_slug: str = "",
-        metadata: Optional[Dict] = None
+        metadata: Optional[Dict] = None,
+        expiration: Optional[int] = None,
+        post_only: bool = False,
+        fee_rate_bps: Optional[int] = None,
     ) -> Dict:
         """
         Place a limit order with validation.
@@ -286,14 +289,35 @@ class OrderManager:
                 "error": f"Already have {len(active_for_token)} active {side} order(s) for this token"
             }
         
+        metadata = dict(metadata or {})
+        if "outcome_side" not in metadata:
+            metadata["outcome_side"] = metadata.get("side")
+        metadata.setdefault("post_only", bool(post_only))
+        metadata.setdefault("fee_rate_bps", fee_rate_bps)
+        metadata.setdefault("expiration", expiration)
+        metadata.setdefault("order_type", order_type)
+
         # Place order via client
-        result = self.client.place_order(
-            token_id=token_id,
-            side=side.upper(),
-            price=price,
-            size=size,
-            order_type=order_type
-        )
+        try:
+            result = self.client.place_order(
+                token_id=token_id,
+                side=side.upper(),
+                price=price,
+                size=size,
+                order_type=order_type,
+                expiration=expiration,
+                post_only=post_only,
+                fee_rate_bps=fee_rate_bps,
+            )
+        except TypeError:
+            # Backward-compatible path for mocks/older client signatures.
+            result = self.client.place_order(
+                token_id=token_id,
+                side=side.upper(),
+                price=price,
+                size=size,
+                order_type=order_type,
+            )
         
         if result.get("success"):
             order_id = result.get("order_id", f"unknown_{int(time.time()*1000)}")
@@ -308,7 +332,7 @@ class OrderManager:
                 size=size,
                 order_type=order_type,
                 status=OrderStatus.OPEN,
-                metadata=metadata or {}
+                metadata=metadata
             )
             
             # Store order
@@ -495,6 +519,26 @@ class OrderManager:
             self._persist_order(order)
         
         return result
+
+    def mark_order_cancelled(self, order_id: str, reason: str = "Exchange reported cancellation") -> Dict:
+        """Mark an order cancelled locally without sending another exchange request."""
+        order = self.orders.get(order_id)
+        if not order:
+            return {"success": False, "error": "Order not found"}
+        if not order.is_active:
+            return {"success": False, "error": f"Order not active: {order.status.value}"}
+
+        order.status = OrderStatus.CANCELLED
+        order.updated_at = datetime.now()
+        self.total_orders_cancelled += 1
+        for callback in self._cancel_callbacks:
+            try:
+                callback(order, reason)
+            except Exception as e:
+                cprint(f"❌ Cancel callback error: {e}", "red")
+        cprint(f"🚫 Cancelled: {order} - {reason}", "yellow")
+        self._persist_order(order)
+        return {"success": True}
     
     def cancel_all_orders(self, reason: str = "Cancel all requested") -> int:
         """
@@ -736,6 +780,3 @@ class OrderManager:
         if cancelled:
             cprint(f"🧹 Cancelled {cancelled} orders for expired markets", "yellow")
         return cancelled
-
-
-

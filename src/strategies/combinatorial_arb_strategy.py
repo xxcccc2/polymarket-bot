@@ -4,8 +4,8 @@ Combinatorial Arbitrage Strategy
 Finds logical pricing inconsistencies across related Polymarket markets.
 
 Core thesis: If "BTC > $100k" is priced at 40¢ but "BTC > $90k" is only 35¢,
-that's a logical violation — the first IMPLIES the second. Buy the underpriced
-implication and/or sell the overpriced one.
+that's a logical violation — the first IMPLIES the second. This implementation
+trades the underpriced side of the violation with maker-style buy orders.
 
 $40M+ was extracted from Polymarket via combinatorial arb (Milionis et al. 2024).
 
@@ -13,7 +13,7 @@ How it works:
     1. Parse market questions to extract thresholds and directions
     2. Group markets by underlying asset/event
     3. Check monotonicity constraints (e.g., P(X > 100) <= P(X > 90))
-    4. When violations found → arb both sides
+    4. When violations are found → buy the underpriced side
 
 Types of logical constraints:
     - Threshold monotonicity: P(BTC > 100k) <= P(BTC > 90k) <= P(BTC > 80k)
@@ -56,10 +56,6 @@ COMBO_MIN_CONFIDENCE = 0.60
 COMBO_MAX_BUY_PRICE = 0.92
 COMBO_MIN_BUY_PRICE = 0.03
 
-# Fee rate for edge calculation
-COMBO_FEE_RATE = 0.02
-
-
 # ----- Threshold Extraction Patterns -----
 
 # Matches patterns like "above $100,000", "over 100k", "> $90,000", "reach $95k"
@@ -96,11 +92,12 @@ MONTH_ORDER = {
 class MarketGroup:
     """A group of related markets with the same underlying."""
 
-    __slots__ = ("asset", "direction", "markets")
+    __slots__ = ("asset", "direction", "family_key", "markets")
 
-    def __init__(self, asset: str, direction: str) -> None:
+    def __init__(self, asset: str, direction: str, family_key: str) -> None:
         self.asset = asset
         self.direction = direction  # "above" or "below"
+        self.family_key = family_key
         # List of (threshold_value, MarketData) sorted by threshold
         self.markets: List[Tuple[float, MarketData]] = []
 
@@ -125,7 +122,7 @@ class CombinatorialArbStrategy(BaseStrategy):
     """
 
     name = "combinatorial_arb"
-    description = "Exploit logical pricing violations across related markets"
+    description = "Exploit one-sided logical monotonicity violations across related markets"
     version = "1.0.0"
 
     def __init__(self, config: Optional[Dict[str, Any]] = None) -> None:
@@ -139,8 +136,6 @@ class CombinatorialArbStrategy(BaseStrategy):
         self.edge_size_cap = float(self.config.get("combo_edge_size_cap", COMBO_EDGE_SIZE_CAP))
         self.min_confidence = float(self.config.get("combo_min_confidence", COMBO_MIN_CONFIDENCE))
         self.order_size = float(self.config.get("order_size_usd", ORDER_SIZE_USD))
-        self.fee_rate = float(self.config.get("combo_fee_rate", COMBO_FEE_RATE))
-
         # Cooldown: "token_a|token_b" -> last signal time
         self._pair_cooldowns: Dict[str, float] = {}
 
@@ -159,43 +154,69 @@ class CombinatorialArbStrategy(BaseStrategy):
         signals: List[Signal] = []
         now = time.time()
 
-        # Step 1: Parse and group markets by underlying asset + direction
+        # Step 1: Parse and group markets by underlying asset + event/expiry family
         groups: Dict[str, MarketGroup] = {}
+        parsed_markets = 0
+        valid_families = 0
+        violations_found = 0
+        block_reason = "no valid families"
 
         for md in market_data:
+            if not self._eligible_market(md):
+                if not md.has_real_quotes:
+                    block_reason = "missing real quotes"
+                elif not md.accepting_orders:
+                    block_reason = "market not accepting orders"
+                elif md.is_resolved:
+                    block_reason = "market resolved"
+                elif str(md.outcome).upper() != "YES":
+                    block_reason = "non-YES outcome skipped"
+                continue
             parsed = self._parse_market(md)
             if not parsed:
+                block_reason = "unsupported question type"
                 continue
 
             asset, direction, threshold = parsed
-            key = f"{asset}|{direction}"
+            parsed_markets += 1
+            family_key = self._market_family_key(md, asset, direction)
+            key = f"{asset}|{direction}|{family_key}"
 
             if key not in groups:
-                groups[key] = MarketGroup(asset, direction)
+                groups[key] = MarketGroup(asset, direction, family_key)
             groups[key].add(threshold, md)
 
         # Step 2: Check monotonicity within each group
         for key, group in groups.items():
             if len(group) < 2:
                 continue
+            valid_families += 1
 
             violations = self._find_violations(group)
+            violations_found += len(violations)
 
             for violation in violations:
                 v_signals = self._create_signals(violation, group, now)
                 signals.extend(v_signals)
+                self.signals_generated += len(v_signals)
 
         # Status for TUI (always visible)
-        n_parsed = sum(len(g) for g in groups.values())
-        n_groups_multi = sum(1 for g in groups.values() if len(g) >= 2)
-        self._last_scan_status = f"{n_parsed} thresh, {len(groups)} grp, {n_groups_multi}≥2"
+        if signals:
+            top_edge = max((signal.metadata.get("edge_cents", 0) for signal in signals), default=0)
+            self._last_scan_status = (
+                f"{len(signals)} live | {valid_families} fam | {violations_found} vio | top {top_edge}c"
+            )
+        else:
+            self._last_scan_status = (
+                f"{parsed_markets} parsed | {valid_families} fam | {violations_found} vio | {block_reason}"
+            )
 
         # Periodic diagnostic (throttled to avoid log spam)
         if not hasattr(self, "_last_combo_diag") or now - self._last_combo_diag > 300:
             self._last_combo_diag = now
             cprint(
-                f"   🧩 Combo arb: {n_parsed} threshold markets, {len(groups)} groups, "
-                f"{n_groups_multi} with ≥2 (violations: {len(signals)})",
+                f"   🧩 Combo arb: {parsed_markets} parsed, {len(groups)} groups, "
+                f"{valid_families} valid families (violations: {violations_found})",
                 "cyan",
             )
 
@@ -298,6 +319,12 @@ class CombinatorialArbStrategy(BaseStrategy):
 
     def _extract_threshold(self, question: str) -> Optional[float]:
         """Extract numeric threshold from question text."""
+        fallback = re.search(r"\$([\d,]+(?:\.\d+)?)", question, re.IGNORECASE)
+        if fallback:
+            try:
+                return float(fallback.group(1).replace(",", ""))
+            except ValueError:
+                pass
         for pattern in THRESHOLD_PATTERNS:
             match = re.search(pattern, question, re.IGNORECASE)
             if match:
@@ -427,11 +454,14 @@ class CombinatorialArbStrategy(BaseStrategy):
                     signal_type=SignalType.BUY,
                     token_id=under_md.token_id or "",
                     market_slug=under_md.market_slug or "",
-                    side="YES",
+                    side=under_md.outcome or "YES",
                     price=under_price,
                     size=round(size_shares, 2),
                     confidence=confidence,
-                    reason=f"Combo arb: {group.asset} {group.direction} ${under_thresh:,.0f} underpriced vs ${over_thresh:,.0f}",
+                    reason=(
+                        f"Combo monotonicity: {group.asset} {group.direction} ${under_thresh:,.0f} "
+                        f"underpriced vs ${over_thresh:,.0f}"
+                    ),
                     metadata={
                         "strategy": self.name,
                         "violation_type": "monotonicity_buy_underpriced",
@@ -439,6 +469,7 @@ class CombinatorialArbStrategy(BaseStrategy):
                         "threshold": under_thresh,
                         "pair_market": over_md.market_slug or "",
                         "asset": group.asset,
+                        "family_key": group.family_key,
                     },
                 ))
 
@@ -457,3 +488,23 @@ class CombinatorialArbStrategy(BaseStrategy):
         state["active_cooldowns"] = len(self._pair_cooldowns)
         state["status"] = getattr(self, "_last_scan_status", "—")
         return state
+
+    @staticmethod
+    def _eligible_market(md: MarketData) -> bool:
+        return (
+            md.has_real_quotes
+            and md.accepting_orders
+            and not md.is_resolved
+            and str(md.outcome).upper() == "YES"
+        )
+
+    @staticmethod
+    def _market_family_key(md: MarketData, asset: str, direction: str) -> str:
+        if md.event_slug:
+            return f"{md.event_slug}|{direction}"
+        if md.event_title:
+            return f"{md.event_title.lower()}|{direction}"
+        if md.end_date_ts:
+            bucket = int(float(md.end_date_ts) // 3600)
+            return f"{asset}|{bucket}|{direction}"
+        return f"{asset}|{md.market_slug}|{direction}"

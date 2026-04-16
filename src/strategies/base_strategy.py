@@ -91,6 +91,16 @@ class MarketData:
     orderbook: Optional[Dict] = None  # Full orderbook if available
     recent_trades: Optional[List[Dict]] = None  # Recent trades for VPIN
     end_date_ts: Optional[float] = None  # Unix sec when market resolves (for expiry checks)
+    event_title: str = ""
+    event_slug: str = ""
+    has_real_quotes: bool = False
+    accepting_orders: bool = True
+    fees_enabled: bool = True
+    fee_rate_bps: Optional[float] = None
+    is_resolved: bool = False
+    resolution_outcome: Optional[str] = None
+    data_source_quality: str = "unknown"
+    quote_source: str = "gamma"
     
     @property
     def spread_cents(self) -> float:
@@ -232,6 +242,5 @@ class BaseStrategy(ABC):
     
     def __repr__(self):
         return f"<{self.__class__.__name__} name='{self.name}' running={self.is_running}>"
-
 
 

@@ -120,6 +120,7 @@ class MLDirectionalStrategy(BaseStrategy):
         self._horizon_signal_counts: Dict[str, int] = {"15m": 0, "1h": 0}
         self._horizon_trade_counts: Dict[str, int] = {"15m": 0, "1h": 0}
         self._horizon_last_signal_ts: Dict[str, float] = {"15m": 0.0, "1h": 0.0}
+        self._horizon_status: Dict[str, str] = {"15m": "idle", "1h": "idle"}
 
         self._load_model_if_needed(force=True)
         if self.enabled_horizons:
@@ -138,6 +139,10 @@ class MLDirectionalStrategy(BaseStrategy):
             return False
         if "up or down" not in text:
             return False
+        if not market_data.has_real_quotes or market_data.data_source_quality != "live_quotes":
+            return False
+        if not market_data.accepting_orders or market_data.is_resolved:
+            return False
 
         horizon = self._extract_horizon(text)
         if not horizon or horizon not in self.enabled_horizons:
@@ -153,30 +158,53 @@ class MLDirectionalStrategy(BaseStrategy):
         self._update_resolution_tracking(market_data)
         signals: list[Signal] = []
         seen_condition_ids: set[str] = set()
+        block_reason = "idle"
+        horizon_blocks: Dict[str, str] = {horizon: "idle" for horizon in ("15m", "1h")}
+        horizon_signal_counts: Dict[str, int] = {horizon: 0 for horizon in ("15m", "1h")}
 
         if not self.enabled:
+            self._last_scan_status = "disabled"
+            self._horizon_status = {horizon: "disabled" for horizon in self._horizon_status}
             return signals
         if not self.binance_feed:
+            self._last_scan_status = "no Binance feed"
+            self._horizon_status = {horizon: "no Binance feed" for horizon in self._horizon_status}
             return signals
 
         current_state = self.binance_feed.get_state("btc")
         if not current_state.connected:
             self._halt_reason = "Binance feed disconnected"
+            self._last_scan_status = "Binance disconnected"
+            self._horizon_status = {horizon: "Binance disconnected" for horizon in self._horizon_status}
             return signals
         if current_state.last_update and (time.time() - current_state.last_update) > self.feed_stale_seconds:
             self._halt_reason = "Binance feed stale"
+            self._last_scan_status = "Binance stale"
+            self._horizon_status = {horizon: "Binance stale" for horizon in self._horizon_status}
             return signals
         if self._halt_reason == "Binance feed disconnected" or self._halt_reason == "Binance feed stale":
             self._halt_reason = None
 
         for data in market_data:
+            horizon = self._extract_horizon(f"{data.question} {data.market_slug}".lower()) or "15m"
             if not self.should_trade_market(data):
+                if not data.has_real_quotes:
+                    block_reason = "missing real quotes"
+                elif not data.accepting_orders:
+                    block_reason = "market not accepting orders"
+                elif data.is_resolved:
+                    block_reason = "market resolved"
+                horizon_blocks[horizon] = block_reason
                 continue
             if data.condition_id in self.active_condition_ids or data.condition_id in seen_condition_ids:
+                block_reason = "condition already active"
+                horizon_blocks[horizon] = block_reason
                 continue
 
             inference = self._infer_market(data, current_state)
             if inference is None:
+                block_reason = self.model_error or "inference unavailable"
+                horizon_blocks[horizon] = block_reason
                 continue
             outcome_probability = float(inference["probability"])
             model_threshold = float(inference["threshold_probability"])
@@ -185,19 +213,24 @@ class MLDirectionalStrategy(BaseStrategy):
             threshold = max(self.min_edge, self._compute_threshold(data.mid_price))
             edge = outcome_probability - data.mid_price
             if outcome_probability < model_threshold or edge <= threshold:
+                block_reason = f"edge {edge*100:.1f}c < {threshold*100:.1f}c"
+                horizon_blocks[horizon] = block_reason
                 continue
 
             bet_size_usd = self._size_bet(outcome_probability, data.mid_price, data.token_id)
             if bet_size_usd <= 0:
+                block_reason = "size <= 0"
+                horizon_blocks[horizon] = block_reason
                 continue
 
             buy_price = min(data.best_bid + self.maker_offset, data.best_ask - 0.001)
             buy_price = round(max(0.01, min(0.99, buy_price)), 3)
             shares = round(max(0.0, bet_size_usd / buy_price), 2)
             if shares <= 0:
+                block_reason = "shares <= 0"
+                horizon_blocks[horizon] = block_reason
                 continue
 
-            horizon = self._extract_horizon(f"{data.question} {data.market_slug}".lower())
             signal = Signal(
                 signal_type=SignalType.BUY,
                 token_id=data.token_id,
@@ -223,6 +256,7 @@ class MLDirectionalStrategy(BaseStrategy):
             )
             signals.append(signal)
             seen_condition_ids.add(data.condition_id)
+            horizon_signal_counts[horizon] += 1
 
         if len(signals) > self.max_signals_per_cycle:
             signals.sort(key=lambda item: item.metadata.get("edge", 0.0), reverse=True)
@@ -235,6 +269,17 @@ class MLDirectionalStrategy(BaseStrategy):
             if horizon in self._horizon_signal_counts:
                 self._horizon_signal_counts[horizon] += 1
                 self._horizon_last_signal_ts[horizon] = self.last_signal_time[signal.token_id]
+        if signals:
+            self._last_scan_status = f"{len(signals)} live signals"
+        elif self._halt_reason:
+            self._last_scan_status = self._halt_reason
+        else:
+            self._last_scan_status = block_reason
+        for horizon in self._horizon_status:
+            if horizon_signal_counts.get(horizon, 0) > 0:
+                self._horizon_status[horizon] = f"{horizon_signal_counts[horizon]} live signals"
+            else:
+                self._horizon_status[horizon] = horizon_blocks.get(horizon) or "idle"
         return signals
 
     def execute(self, signals: List[Signal], order_manager) -> List[Dict]:
@@ -248,8 +293,10 @@ class MLDirectionalStrategy(BaseStrategy):
                     side="BUY",
                     price=signal.price,
                     size=signal.size,
-                    order_type="GTC",
+                    order_type="GTD",
                     market_slug=signal.market_slug,
+                    expiration=self._order_expiration(signal.metadata.get("end_date_ts")),
+                    post_only=True,
                     metadata={"strategy": self.name, **signal.metadata},
                 )
                 if result.get("success"):
@@ -324,10 +371,17 @@ class MLDirectionalStrategy(BaseStrategy):
                         "signals": self._horizon_signal_counts.get(horizon, 0),
                         "trades": self._horizon_trade_counts.get(horizon, 0),
                         "last_signal_ts": self._horizon_last_signal_ts.get(horizon, 0.0),
-                        "status": self._model_errors_by_horizon.get(horizon) or "—",
+                        "status": self._model_errors_by_horizon.get(horizon) or self._horizon_status.get(horizon) or "—",
+                        "model_version": self._model_versions_by_horizon.get(horizon, "unloaded"),
+                        "last_inference_ts": self._last_inference_ts,
+                        "rolling_accuracy": rolling_accuracy,
+                        "rolling_brier": rolling_brier,
+                        "pending_resolutions": len(self._pending_resolutions),
+                        "halt_reason": self._halt_reason,
                     }
                     for horizon in sorted(self.enabled_horizons or {"15m", "1h"})
                 },
+                "status": self._last_scan_status or "—",
             }
         )
         return state
@@ -536,8 +590,9 @@ class MLDirectionalStrategy(BaseStrategy):
                 continue
             if now_ts < float(end_date_ts):
                 continue
-
-            actual = 1.0 if current.mid_price >= 0.5 else 0.0
+            actual = self._resolved_actual(current)
+            if actual is None:
+                continue
             predicted_prob = float(pending.get("predicted_prob", 0.5) or 0.5)
             predicted_label = 1.0 if predicted_prob >= 0.5 else 0.0
             won = predicted_label == actual
@@ -571,6 +626,23 @@ class MLDirectionalStrategy(BaseStrategy):
             self._paused_until = max(self._paused_until, now + self.hard_pause_seconds)
         elif self._consecutive_losses >= self.soft_loss_streak:
             self._paused_until = max(self._paused_until, now + self.soft_pause_seconds)
+
+    @staticmethod
+    def _resolved_actual(market_data: MarketData) -> Optional[float]:
+        if not market_data.is_resolved or not market_data.resolution_outcome:
+            return None
+        return 1.0 if str(market_data.outcome).upper() == str(market_data.resolution_outcome).upper() else 0.0
+
+    @staticmethod
+    def _order_expiration(end_date_ts: Optional[float]) -> Optional[int]:
+        now_ts = time.time()
+        if end_date_ts:
+            candidate = min(float(end_date_ts) - 15.0, now_ts + 120.0)
+        else:
+            candidate = now_ts + 120.0
+        if candidate <= now_ts + 5:
+            return None
+        return int(candidate)
 
     def _rolling_accuracy(self) -> float:
         if not self._resolved_accuracy:

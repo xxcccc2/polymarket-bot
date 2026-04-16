@@ -42,16 +42,16 @@ from ..config import (
 )
 
 
-def _crypto_taker_fee_cents(price: float) -> float:
-    """
-    Crypto market taker fee in cents per share (Polymarket 2026 formula).
-    fee = C × p × 0.25 × (p × (1-p))^2 → effective rate 0.25*(p*(1-p))^2.
-    At 50%: ~1.56%. Returns fee in cents per share (for edge subtraction).
-    """
+def _crypto_taker_fee_cents(price: float, fee_rate_bps: Optional[float], fees_enabled: bool) -> float:
+    """Estimate taker fee in cents per share using market fee configuration when available."""
+    if not fees_enabled:
+        return 0.0
     if price <= 0 or price >= 1:
         return 0.0
-    # Fee per share = price * 0.25 * (p*(1-p))^2; in cents: 25 * p * (p*(1-p))^2
-    return 25.0 * price * (price * (1.0 - price)) ** 2
+    if fee_rate_bps is None:
+        fee_rate_bps = TRADING_FEE_RATE * 10_000 if TRADING_FEE_RATE <= 1 else TRADING_FEE_RATE
+    fee_rate = max(float(fee_rate_bps), 0.0) / 10_000.0
+    return 100.0 * fee_rate * price * (1.0 - price)
 
 
 class TerminalConvergenceStrategy(BaseStrategy):
@@ -91,6 +91,9 @@ class TerminalConvergenceStrategy(BaseStrategy):
         self.positions: Dict[str, float] = {}
         self.last_signal_time: Dict[str, float] = {}
         self.signal_cooldown_s = self.config.get("signal_cooldown_s", 15)
+        self._last_best_edge_cents = 0.0
+        self._last_nearest_expiry_s = 0.0
+        self._last_fill_mode = "GTD"
 
     def should_trade_market(self, market_data: MarketData) -> bool:
         """Trade crypto 1h Up/Down markets within the convergence window (near expiry)."""
@@ -111,6 +114,10 @@ class TerminalConvergenceStrategy(BaseStrategy):
         else:
             is_shortterm = any(kw in text for kw in BTC_5MIN_KEYWORDS)
         if not (is_crypto and is_shortterm):
+            return False
+        if not market_data.has_real_quotes:
+            return False
+        if not market_data.accepting_orders or market_data.is_resolved:
             return False
 
         # Must be within convergence window (seconds before expiry)
@@ -157,26 +164,40 @@ class TerminalConvergenceStrategy(BaseStrategy):
         n_eligible = 0
         best_prob = 0.0
         best_edge = -999.0
+        nearest_expiry = None
+        block_reason = "no markets in window"
 
         for data in market_data:
             if not self.should_trade_market(data):
+                if not data.has_real_quotes:
+                    block_reason = "missing real quotes"
+                elif not data.accepting_orders:
+                    block_reason = "market not accepting orders"
+                elif data.is_resolved:
+                    block_reason = "market resolved"
                 continue
             n_eligible += 1
+            if data.end_date_ts:
+                expiry_s = max(float(data.end_date_ts) - time.time(), 0.0)
+                nearest_expiry = expiry_s if nearest_expiry is None else min(nearest_expiry, expiry_s)
 
             # Position limit
             current_pos = self.positions.get(data.token_id, 0)
             if current_pos >= self.max_position_usd:
+                block_reason = "position limit"
                 continue
 
             # Asset-specific feed (BTC, ETH, SOL, XRP)
             asset = self._get_asset_from_market(data)
             binance = self.binance_feed.get_state(asset)
             if not binance.last_price > 0:
+                block_reason = "missing spot price"
                 continue
 
             # Parse what the market is asking and extract the strike price
             strike_info = self._parse_strike(data.question, data.outcome)
             if not strike_info:
+                block_reason = "unparseable strike"
                 continue
 
             strike_price, direction, outcome_label = strike_info
@@ -191,11 +212,13 @@ class TerminalConvergenceStrategy(BaseStrategy):
                     # Price to Beat = candle open. Use Binance REST kline.
                     candle_open = self.binance_feed.get_1h_candle_open(asset) if hasattr(self.binance_feed, "get_1h_candle_open") else None
                     if candle_open is None or candle_open <= 0:
+                        block_reason = "missing 1h candle open"
                         continue
                     price_to_beat = candle_open
                     diff_pct = (spot_price - candle_open) / candle_open * 100
                     # Need clear direction: |diff| >= 0.03% (~$30 on $100k BTC)
                     if abs(diff_pct) < 0.03:
+                        block_reason = "move below certainty gate"
                         continue
                     if outcome_label.lower() == "up":
                         estimated_prob = 0.98 if diff_pct > 0 else 0.02
@@ -210,6 +233,7 @@ class TerminalConvergenceStrategy(BaseStrategy):
                     pressure = binance.bid_pressure  # 0-1, >0.5 = buying
                     price_move = max(abs(move_10s), abs(move_30s), abs(move_60s))
                     if price_move < 0.02:  # need at least 0.02% real move
+                        block_reason = "momentum below threshold"
                         continue
                     momentum = (
                         move_60s * 0.40
@@ -234,6 +258,7 @@ class TerminalConvergenceStrategy(BaseStrategy):
 
             # Only interested in near-certain outcomes
             if estimated_prob < self.min_certainty:
+                block_reason = f"certainty {estimated_prob:.2f} < {self.min_certainty:.2f}"
                 continue
 
             # Current market price
@@ -243,12 +268,14 @@ class TerminalConvergenceStrategy(BaseStrategy):
             edge_cents = (estimated_prob - market_price) * 100
 
             if edge_cents < self.min_edge_cents:
+                block_reason = f"edge {edge_cents:.1f}c < {self.min_edge_cents:.1f}c"
                 continue
 
             # Account for taker fees (5-min/15-min crypto markets use dynamic fee)
-            fee_cents = _crypto_taker_fee_cents(market_price)
+            fee_cents = _crypto_taker_fee_cents(market_price, data.fee_rate_bps, data.fees_enabled)
             net_edge_cents = edge_cents - fee_cents
             if net_edge_cents < 1.0:  # need at least 1¢ net edge
+                block_reason = f"net edge {net_edge_cents:.1f}c < 1.0c"
                 continue
 
             # Confidence: higher when spot is further from strike / probability is more extreme
@@ -295,6 +322,8 @@ class TerminalConvergenceStrategy(BaseStrategy):
                     "edge_cents": round(edge_cents, 2),
                     "net_edge_cents": round(net_edge_cents, 2),
                     "strategy": "terminal_convergence",
+                    "end_date_ts": data.end_date_ts,
+                    "fee_rate_bps": int(data.fee_rate_bps or 0) if data.fee_rate_bps is not None else None,
                 },
             )
 
@@ -311,10 +340,20 @@ class TerminalConvergenceStrategy(BaseStrategy):
             self.signals_generated += 1
             self.last_signal_time[sig.token_id] = time.time()
             cprint(f"  🏁 {sig}", "green")
+        self._last_best_edge_cents = best_edge if best_edge > -999 else 0.0
+        self._last_nearest_expiry_s = nearest_expiry or 0.0
+        self._last_fill_mode = "GTD"
 
         # Status for TUI (always visible)
         mode = "1h-only" if self._1h_only else "5m/15m/1h/4h"
-        self._last_scan_status = f"{n_eligible} in window" if n_eligible > 0 else f"0 ({mode})"
+        if signals:
+            self._last_scan_status = (
+                f"{len(signals)} live | edge {self._last_best_edge_cents:.1f}c | exp {self._last_nearest_expiry_s:.0f}s"
+            )
+        elif n_eligible > 0:
+            self._last_scan_status = f"{n_eligible} in window | {block_reason}"
+        else:
+            self._last_scan_status = f"0 ({mode})"
 
         # Diagnostic — throttled; log when eligible but no signals, or periodically when 0 eligible
         now = time.time()
@@ -351,8 +390,10 @@ class TerminalConvergenceStrategy(BaseStrategy):
                     side="BUY",
                     price=signal.price,
                     size=signal.size,
-                    order_type="GTC",
+                    order_type="GTD",
+                    expiration=self._order_expiration(signal.metadata.get("end_date_ts")),
                     market_slug=signal.market_slug,
+                    fee_rate_bps=signal.metadata.get("fee_rate_bps"),
                     metadata={"strategy": self.name, **signal.metadata},
                 )
 
@@ -520,6 +561,20 @@ class TerminalConvergenceStrategy(BaseStrategy):
             "convergence_window_s": self.convergence_window_s,
             "min_edge_cents": self.min_edge_cents,
             "min_certainty": self.min_certainty,
+            "best_edge_cents": self._last_best_edge_cents,
+            "nearest_expiry_s": self._last_nearest_expiry_s,
+            "fill_mode": self._last_fill_mode,
             "status": getattr(self, "_last_scan_status", "—"),
         })
         return state
+
+    @staticmethod
+    def _order_expiration(end_date_ts: Optional[float]) -> Optional[int]:
+        now_ts = time.time()
+        if end_date_ts:
+            candidate = min(float(end_date_ts) - 5.0, now_ts + 90.0)
+        else:
+            candidate = now_ts + 90.0
+        if candidate <= now_ts + 3.0:
+            return None
+        return int(candidate)
