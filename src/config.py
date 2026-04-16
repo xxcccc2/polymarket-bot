@@ -410,6 +410,8 @@ PAPER_BALANCE_USD = float(os.getenv("PAPER_BALANCE_USD", "1000"))
 
 # Enable WebSocket feed for orderbook updates (recommended: true for real-time data)
 ENABLE_WEBSOCKET_FEED = os.getenv("ENABLE_WEBSOCKET_FEED", "true").lower() == "true"
+# Enable authenticated user WebSocket for real-time order/fill updates in live mode
+ENABLE_USER_WEBSOCKET_FEED = os.getenv("ENABLE_USER_WEBSOCKET_FEED", "true").lower() == "true"
 
 # Log level
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")

@@ -10,7 +10,8 @@ import random
 import threading
 import concurrent.futures
 import json
-from typing import Dict, List, Optional, Any
+import re
+from typing import Dict, List, Optional, Any, Tuple
 from datetime import datetime
 from .logging_utils import cprint
 
@@ -106,6 +107,8 @@ class PolymarketClient:
         self._heartbeat_thread: Optional[threading.Thread] = None
         self._heartbeat_running = False
         self._heartbeat_warned_unavailable = False
+        self._heartbeat_id: str = ""
+        self._market_meta_cache: Dict[str, Tuple[str, bool]] = {}
         
         # Track rate limits
         self.min_order_interval = 1.0 / ORDER_RATE_LIMIT_SUSTAINED
@@ -216,29 +219,57 @@ class PolymarketClient:
         """Stop client background tasks (heartbeat loop)."""
         self._heartbeat_running = False
 
+    def _extract_heartbeat_id(self, payload: Any) -> str:
+        """Best-effort extraction of the next heartbeat id from API payloads/errors."""
+        if isinstance(payload, dict):
+            for key in ("heartbeat_id", "heartbeatId", "id"):
+                value = payload.get(key)
+                if value:
+                    return str(value)
+        try:
+            text = json.dumps(payload) if isinstance(payload, (dict, list)) else str(payload)
+        except Exception:
+            text = str(payload)
+        match = re.search(r'"heartbeat(?:_id|Id)"\s*:\s*"([^"]+)"', text)
+        if match:
+            return match.group(1)
+        match = re.search(r"heartbeat(?:_id|Id)['\"]?\s*[:=]\s*['\"]?([A-Za-z0-9_-]+)", text)
+        if match:
+            return match.group(1)
+        return ""
+
     def _post_heartbeat_fallback(self) -> Dict[str, Any]:
         """
-        POST heartbeat with empty body. SDK's post_heartbeat uses /v1/heartbeats with
-        heartbeat_id which API rejects ("Invalid Heartbeat ID"). Polymarket docs show
-        POST /heartbeats with no body required.
+        POST heartbeat while tracking the rolling heartbeat id required by the API.
         """
         self.client.assert_level_2_auth()
-        body: Dict[str, Any] = {}
-        serialized = json.dumps(body, separators=(",", ":"), ensure_ascii=False)
         errors = []
         for path in ("/heartbeats", "/v1/heartbeats"):
-            try:
-                request_args = RequestArgs(
-                    method="POST",
-                    request_path=path,
-                    body=body,
-                    serialized_body=serialized,
-                )
-                headers = create_level_2_headers(self.client.signer, self.client.creds, request_args)
-                return clob_post(f"{self.client.host}{path}", headers=headers, data=serialized)
-            except Exception as exc:
-                errors.append(str(exc))
-                continue
+            for attempt in range(2):
+                body: Dict[str, Any] = {}
+                if self._heartbeat_id:
+                    body["heartbeat_id"] = self._heartbeat_id
+                serialized = json.dumps(body, separators=(",", ":"), ensure_ascii=False)
+                try:
+                    request_args = RequestArgs(
+                        method="POST",
+                        request_path=path,
+                        body=body,
+                        serialized_body=serialized,
+                    )
+                    headers = create_level_2_headers(self.client.signer, self.client.creds, request_args)
+                    response = clob_post(f"{self.client.host}{path}", headers=headers, data=serialized)
+                    next_heartbeat_id = self._extract_heartbeat_id(response)
+                    if next_heartbeat_id:
+                        self._heartbeat_id = next_heartbeat_id
+                    return response
+                except Exception as exc:
+                    errors.append(str(exc))
+                    next_heartbeat_id = self._extract_heartbeat_id(exc)
+                    if attempt == 0 and next_heartbeat_id and next_heartbeat_id != self._heartbeat_id:
+                        self._heartbeat_id = next_heartbeat_id
+                        continue
+                    break
 
         if not self._heartbeat_warned_unavailable:
             cprint("WARNING: Heartbeat endpoint unavailable on current API/SDK combination", "yellow")
@@ -351,6 +382,60 @@ class PolymarketClient:
             cprint(f"Connection failed: {e}", "red")
             self.is_connected = False
             return False
+
+    def get_api_credentials(self) -> Optional[Dict[str, str]]:
+        """Expose the current L2 API credentials for authenticated user streams."""
+        if not self.client:
+            return None
+        creds = getattr(self.client, "creds", None)
+        if not creds:
+            return None
+        api_key = getattr(creds, "api_key", None)
+        api_secret = getattr(creds, "api_secret", None)
+        api_passphrase = getattr(creds, "api_passphrase", None)
+        if not (api_key and api_secret and api_passphrase):
+            return None
+        return {
+            "apiKey": str(api_key),
+            "secret": str(api_secret),
+            "passphrase": str(api_passphrase),
+        }
+
+    def _get_order_create_options(self, token_id: str) -> Optional[Dict[str, Any]]:
+        """Resolve per-market options required by the current Polymarket SDK."""
+        cached = self._market_meta_cache.get(token_id)
+        if cached:
+            return {"tick_size": cached[0], "neg_risk": cached[1]}
+
+        if not self.client:
+            return None
+
+        try:
+            tick_size = self._retry_call(
+                lambda: self.client.get_tick_size(token_id),
+                f"Fetch tick size {token_id}",
+            )
+            neg_risk = self._retry_call(
+                lambda: self.client.get_neg_risk(token_id),
+                f"Fetch neg risk {token_id}",
+            )
+            if tick_size:
+                resolved = (str(tick_size), bool(neg_risk))
+                self._market_meta_cache[token_id] = resolved
+                return {"tick_size": resolved[0], "neg_risk": resolved[1]}
+        except Exception as exc:
+            cprint(
+                f"WARNING: Failed to resolve order options for {token_id}: {self._format_error(exc)}",
+                "yellow",
+            )
+        return None
+
+    def invalidate_market_metadata(self, token_id: Optional[str] = None) -> None:
+        """Invalidate cached market metadata after live contract/config changes."""
+        if token_id:
+            self._market_meta_cache.pop(token_id, None)
+            return
+        self._market_meta_cache.clear()
     
     def _rate_limit(self):
         """Enforce rate limiting between orders."""
@@ -646,7 +731,10 @@ class PolymarketClient:
         side: str,
         price: float,
         size: float,
-        order_type: str = "GTC"
+        order_type: str = "GTC",
+        expiration: Optional[int] = None,
+        post_only: bool = False,
+        fee_rate_bps: Optional[int] = None,
     ) -> Dict:
         """
         Place a limit order.
@@ -687,19 +775,23 @@ class PolymarketClient:
                 price=price,
                 size=size,
                 side=BUY if side.upper() == "BUY" else SELL,
-                token_id=token_id
+                token_id=token_id,
+                expiration=int(expiration or 0),
+                fee_rate_bps=int(fee_rate_bps or 0),
             )
             
+            create_options = self._get_order_create_options(token_id)
+
             # Create and sign order
             signed_order = self._retry_call(
-                lambda: self.client.create_order(order_args),
+                lambda: self.client.create_order(order_args, create_options),
                 "Create order",
             )
 
             # Post order
-            ot = OrderType.GTC if order_type == "GTC" else OrderType.FOK
+            ot = getattr(OrderType, order_type.upper(), OrderType.GTC)
             result = self._retry_call(
-                lambda: self.client.post_order(signed_order, ot),
+                lambda: self.client.post_order(signed_order, ot, post_only=post_only),
                 "Post order",
             )
             
@@ -725,15 +817,18 @@ class PolymarketClient:
                             price=price,
                             size=size,
                             side=BUY if side.upper() == "BUY" else SELL,
-                            token_id=token_id
+                            token_id=token_id,
+                            expiration=int(expiration or 0),
+                            fee_rate_bps=int(fee_rate_bps or 0),
                         )
+                        create_options = self._get_order_create_options(token_id)
                         signed_order = self._retry_call(
-                            lambda: self.client.create_order(order_args),
+                            lambda: self.client.create_order(order_args, create_options),
                             "Create order",
                         )
-                        ot = OrderType.GTC if order_type == "GTC" else OrderType.FOK
+                        ot = getattr(OrderType, order_type.upper(), OrderType.GTC)
                         result = self._retry_call(
-                            lambda: self.client.post_order(signed_order, ot),
+                            lambda: self.client.post_order(signed_order, ot, post_only=post_only),
                             "Post order",
                         )
                         cprint(f"Order placed after allowance refresh: {side} {size:.2f} @ ${price:.3f}", "green")
@@ -790,17 +885,19 @@ class PolymarketClient:
             batch_args: List[PostOrdersArgs] = []
             for order in orders:
                 side = (order.get("side") or "").upper()
+                token_id = order["token_id"]
                 order_args = OrderArgs(
                     price=float(order["price"]),
                     size=float(order["size"]),
                     side=BUY if side == "BUY" else SELL,
-                    token_id=order["token_id"],
+                    token_id=token_id,
                 )
+                create_options = self._get_order_create_options(token_id)
                 signed_order = self._retry_call(
-                    lambda oa=order_args: self.client.create_order(oa),
+                    lambda oa=order_args, opts=create_options: self.client.create_order(oa, opts),
                     "Create batch order",
                 )
-                ot = OrderType.GTC if order.get("order_type", "GTC") == "GTC" else OrderType.FOK
+                ot = getattr(OrderType, str(order.get("order_type", "GTC")).upper(), OrderType.GTC)
                 batch_args.append(PostOrdersArgs(order=signed_order, orderType=ot))
 
             posted = self._retry_call(
@@ -1123,6 +1220,3 @@ def create_client() -> PolymarketClient:
     client = PolymarketClient()
     client.connect()
     return client
-
-
-

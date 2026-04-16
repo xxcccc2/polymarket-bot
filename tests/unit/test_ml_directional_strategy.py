@@ -134,6 +134,9 @@ def _market(outcome: str, mid_price: float) -> MarketData:
         volume_24h=100000.0,
         liquidity=25000.0,
         last_price=mid_price,
+        has_real_quotes=True,
+        accepting_orders=True,
+        data_source_quality="live_quotes",
         timestamp=datetime.now(timezone.utc),
         orderbook={"bids": [[mid_price - 0.01, 20]], "asks": [[mid_price + 0.01, 10]]},
         end_date_ts=2_000_000_600.0,
@@ -155,6 +158,9 @@ def _market_with_horizon(outcome: str, mid_price: float, horizon: str) -> Market
         volume_24h=100000.0,
         liquidity=25000.0,
         last_price=mid_price,
+        has_real_quotes=True,
+        accepting_orders=True,
+        data_source_quality="live_quotes",
         timestamp=datetime.now(timezone.utc),
         orderbook={"bids": [[mid_price - 0.01, 20]], "asks": [[mid_price + 0.01, 10]]},
         end_date_ts=2_000_000_600.0,
@@ -258,6 +264,33 @@ def test_strategy_uses_risk_manager_inventory_for_sizing(tmp_path):
     base_sized = without_inventory.analyze([_market("Up", 0.60)])[0].size
 
     assert risk_sized <= base_sized
+
+
+def test_resolution_tracking_uses_resolved_outcome_not_mid_price(tmp_path):
+    artifact_path = tmp_path / "ml_directional.pkl"
+    _write_artifact(artifact_path)
+    strategy = MLDirectionalStrategy(
+        {
+            "binance_feed": DummyBinanceFeed(),
+            "model_path": artifact_path,
+            "min_edge": 0.02,
+        }
+    )
+
+    strategy._pending_resolutions["token-up"] = {
+        "predicted_prob": 0.8,
+        "condition_id": "cond-1",
+        "end_date_ts": 1.0,
+    }
+    resolved_market = _market("Up", 0.9)
+    resolved_market.is_resolved = True
+    resolved_market.resolution_outcome = "DOWN"
+    resolved_market.end_date_ts = 1.0
+
+    strategy._update_resolution_tracking([resolved_market])
+
+    assert list(strategy._resolved_accuracy) == [0.0]
+    assert "token-up" not in strategy._pending_resolutions
 
 
 def test_strategy_state_reports_horizon_stats(tmp_path):
