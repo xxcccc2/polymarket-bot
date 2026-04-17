@@ -96,6 +96,7 @@ class PortfolioSnapshot:
     active_orders: int = 0
     max_orders: int = 10
     filled: int = 0
+    fill_events: int = 0  # includes partial fills (OrderManager process_fill)
     cancelled: int = 0
     fill_rate: float = 0.0
     throttle: float = 1.0
@@ -326,7 +327,7 @@ class Dashboard:
         lines = [
             f"Balance  [bold]${p.balance:,.2f}[/] ([{session_style}]{session_pnl:+.2f}[/])",
             f"Exposure ${p.exposure:,.2f} ({p.exposure_pct:.1f}%)  |  Pos {p.positions}",
-            f"Orders   {p.active_orders}/{p.max_orders}  |  Fill {p.filled} ({p.fill_rate:.0f}%)",
+            f"Orders   {p.active_orders}/{p.max_orders}  |  Fills {p.fill_events} (done {p.filled}, {p.fill_rate:.0f}%)",
             f"Daily PnL [{session_style}]{p.daily_pnl:+.2f}[/]  |  Bal age {Dashboard._fmt_age(p.balance_age_seconds)}",
             f"U-PnL   [{unrealized_style}]{p.unrealized_pnl:+.2f}[/]",
         ]

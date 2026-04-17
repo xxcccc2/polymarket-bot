@@ -39,6 +39,7 @@ from ..config import (
     MAX_POSITION_USD,
     TRADING_FEE_RATE,
     ENABLE_BTC_5MIN,
+    clob_gtd_expiration_unix,
 )
 
 
@@ -385,13 +386,18 @@ class TerminalConvergenceStrategy(BaseStrategy):
                 continue
 
             try:
+                gtd_exp = clob_gtd_expiration_unix(
+                    signal.metadata.get("end_date_ts"),
+                    max_horizon_sec=90.0,
+                    before_resolution_sec=5.0,
+                )
                 order_result = order_manager.place_limit_order(
                     token_id=signal.token_id,
                     side="BUY",
                     price=signal.price,
                     size=signal.size,
-                    order_type="GTD",
-                    expiration=self._order_expiration(signal.metadata.get("end_date_ts")),
+                    order_type="GTD" if gtd_exp is not None else "GTC",
+                    expiration=gtd_exp,
                     market_slug=signal.market_slug,
                     fee_rate_bps=signal.metadata.get("fee_rate_bps"),
                     metadata={"strategy": self.name, **signal.metadata},
@@ -568,13 +574,3 @@ class TerminalConvergenceStrategy(BaseStrategy):
         })
         return state
 
-    @staticmethod
-    def _order_expiration(end_date_ts: Optional[float]) -> Optional[int]:
-        now_ts = time.time()
-        if end_date_ts:
-            candidate = min(float(end_date_ts) - 5.0, now_ts + 90.0)
-        else:
-            candidate = now_ts + 90.0
-        if candidate <= now_ts + 3.0:
-            return None
-        return int(candidate)

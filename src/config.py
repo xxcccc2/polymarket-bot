@@ -3,7 +3,9 @@ Polymarket Micro-Spread Trading Bot - Configuration
 """
 
 import os
+import time
 from pathlib import Path
+from typing import Optional
 from dotenv import load_dotenv
 
 
@@ -402,6 +404,10 @@ MARKET_REFRESH_SECONDS = int(os.getenv("MARKET_REFRESH_SECONDS", "300"))
 # How often to refresh account balance (seconds)
 BALANCE_REFRESH_SECONDS = int(os.getenv("BALANCE_REFRESH_SECONDS", "60"))
 
+# How often to reconcile active orders + positions against the exchange (seconds).
+# Catches missed fills and corrects drifted exposure.
+POSITIONS_SYNC_SECONDS = int(os.getenv("POSITIONS_SYNC_SECONDS", "120"))
+
 # Paper trading mode (no real orders)
 PAPER_TRADING = os.getenv("PAPER_TRADING", "true").lower() == "true"
 
@@ -462,6 +468,9 @@ TRADING_FEE_RATE = float(os.getenv("TRADING_FEE_RATE", "0.01"))
 # Maker fee (round-trip): 0 = Polymarket makers pay zero fees (2026+). Used by spread strategy.
 MAKER_FEE_RATE = float(os.getenv("MAKER_FEE_RATE", "0"))
 
+# GTD: API requires expiration unix well after "now" (~60s security threshold); pad for clock skew.
+CLOB_GTD_MIN_LEAD_SECONDS = int(os.getenv("CLOB_GTD_MIN_LEAD_SECONDS", "90"))
+
 # Minimum profit margin after fees to execute trade
 MIN_PROFIT_MARGIN = float(os.getenv("MIN_PROFIT_MARGIN", "0.005"))  # 0.5%
 
@@ -477,6 +486,10 @@ ML_DIRECTIONAL_ENABLED_HORIZONS = [
 ML_DIRECTIONAL_MIN_PROBABILITY = float(os.getenv("ML_DIRECTIONAL_MIN_PROBABILITY", "0.53"))
 ML_DIRECTIONAL_MIN_EDGE = float(os.getenv("ML_DIRECTIONAL_MIN_EDGE", "0.03"))
 ML_DIRECTIONAL_MAKER_OFFSET = float(os.getenv("ML_DIRECTIONAL_MAKER_OFFSET", "0.005"))
+# Post-only limits must rest below the ask; disable to allow taker when the book moves (you pay taker fees).
+ML_DIRECTIONAL_POST_ONLY = os.getenv("ML_DIRECTIONAL_POST_ONLY", "true").lower() == "true"
+# How many ticks below best_ask to place post-only buys (safety against sub-second book drift).
+ML_DIRECTIONAL_POST_ONLY_BUFFER_TICKS = max(1, int(os.getenv("ML_DIRECTIONAL_POST_ONLY_BUFFER_TICKS", "2")))
 ML_DIRECTIONAL_SIGNAL_COOLDOWN_SECONDS = int(os.getenv("ML_DIRECTIONAL_SIGNAL_COOLDOWN_SECONDS", "45"))
 ML_DIRECTIONAL_MAX_SIGNALS_PER_CYCLE = int(os.getenv("ML_DIRECTIONAL_MAX_SIGNALS_PER_CYCLE", "2"))
 ML_DIRECTIONAL_ATR_HALT_PERCENTILE = float(os.getenv("ML_DIRECTIONAL_ATR_HALT_PERCENTILE", "0.95"))
@@ -551,6 +564,33 @@ ML_DATA_DIR.mkdir(exist_ok=True)
 ML_OHLC_DIR.mkdir(exist_ok=True)
 ML_ARTIFACTS_DIR.mkdir(exist_ok=True)
 ML_COLLECTORS_DIR.mkdir(exist_ok=True)
+
+
+def clob_gtd_expiration_unix(
+    end_date_ts: Optional[float],
+    *,
+    max_horizon_sec: float = 120.0,
+    before_resolution_sec: float = 15.0,
+) -> Optional[int]:
+    """
+    Unix timestamp for Polymarket GTD orders.
+
+    The API rejects expirations inside ~60s of "now". If the market resolves before
+    we can satisfy that lead time (while staying before_resolution_sec ahead of end),
+    return None and use GTC instead.
+    """
+    now = time.time()
+    min_exp = now + float(CLOB_GTD_MIN_LEAD_SECONDS)
+    if end_date_ts is not None:
+        cap = float(end_date_ts) - before_resolution_sec
+        raw = min(cap, now + max_horizon_sec)
+    else:
+        cap = float("inf")
+        raw = now + max_horizon_sec
+    candidate = max(raw, min_exp)
+    if end_date_ts is not None and candidate > cap + 1e-9:
+        return None
+    return int(candidate)
 
 
 def validate_config():

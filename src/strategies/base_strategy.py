@@ -101,7 +101,8 @@ class MarketData:
     resolution_outcome: Optional[str] = None
     data_source_quality: str = "unknown"
     quote_source: str = "gamma"
-    
+    tick_size: Optional[float] = None  # CLOB min tick; for post-only bid placement
+
     @property
     def spread_cents(self) -> float:
         """Spread in cents"""

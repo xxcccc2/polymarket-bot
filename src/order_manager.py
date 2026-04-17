@@ -101,6 +101,7 @@ class OrderManager:
         self.total_orders_placed = 0
         self.total_orders_filled = 0
         self.total_orders_cancelled = 0
+        self.total_fill_events = 0  # every process_fill call (includes partials)
         
         # Cleanup thread
         self._cleanup_running = False
@@ -597,7 +598,9 @@ class OrderManager:
         if not order:
             cprint(f"⚠️ Fill for unknown order: {order_id}", "yellow")
             return
-        
+
+        self.total_fill_events += 1
+
         fill_size = float(fill_data.get("size", 0))
         fill_price = float(fill_data.get("price", order.price))
         
@@ -667,6 +670,7 @@ class OrderManager:
             "active_orders": len(active),
             "total_placed": self.total_orders_placed,
             "total_filled": self.total_orders_filled,
+            "total_fill_events": self.total_fill_events,
             "total_cancelled": self.total_orders_cancelled,
             "fill_rate": (
                 self.total_orders_filled / self.total_orders_placed 

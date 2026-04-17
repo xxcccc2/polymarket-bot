@@ -167,6 +167,31 @@ def _market_with_horizon(outcome: str, mid_price: float, horizon: str) -> Market
     )
 
 
+def test_maker_limit_buy_price_post_only_sits_below_ask():
+    strategy = MLDirectionalStrategy({"post_only": True, "maker_offset": 0.005})
+    data = MarketData(
+        token_id="t1",
+        condition_id="c1",
+        market_slug="x",
+        question="Bitcoin Up or Down - 15 min",
+        outcome="Up",
+        best_bid=0.50,
+        best_ask=0.52,
+        mid_price=0.51,
+        spread=0.02,
+        volume_24h=1.0,
+        liquidity=1.0,
+        last_price=0.51,
+        has_real_quotes=True,
+        accepting_orders=True,
+        data_source_quality="live_quotes",
+        tick_size=0.01,
+    )
+    px = strategy._maker_limit_buy_price(data)
+    assert px is not None
+    assert px < data.best_ask
+
+
 def test_strategy_emits_signal_for_matching_outcome(tmp_path):
     artifact_path = tmp_path / "ml_directional.pkl"
     _write_artifact(artifact_path)

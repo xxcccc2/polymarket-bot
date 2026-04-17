@@ -474,6 +474,26 @@ class PolymarketClient:
                 if transient:
                     max_attempts = max(max_attempts, RETRY_MAX_ATTEMPTS + 2)
 
+                # Deterministic 4xx errors - retrying the same signed payload
+                # won't help and just wastes time / makes book drift worse.
+                non_retryable_markers = (
+                    "order crosses book",       # post-only rejection
+                    "post-only",
+                    "not enough balance",
+                    "insufficient balance",
+                    "insufficient allowance",
+                    "invalid order",
+                    "invalid signature",
+                    "invalid tick",
+                    "invalid price",
+                    "invalid size",
+                    "market is closed",
+                    "market not accepting",
+                )
+                if status == 400 and any(marker in msg_lower for marker in non_retryable_markers):
+                    cprint(f"{action} failed (non-retryable): {msg}", "red")
+                    raise exc
+
                 if attempt >= max_attempts:
                     break
 

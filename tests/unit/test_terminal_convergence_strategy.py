@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from src.strategies.base_strategy import MarketData
+import time
+
+from src.strategies.base_strategy import MarketData, Signal, SignalType
 from src.strategies.terminal_convergence_strategy import (
     TerminalConvergenceStrategy,
     _crypto_taker_fee_cents,
@@ -75,7 +77,18 @@ def test_terminal_fee_model_uses_market_fee_configuration():
 
 def test_terminal_execute_uses_gtd_expiration():
     strategy = TerminalConvergenceStrategy({"binance_feed": DummyBinanceFeed(), "1h_only": True})
-    signal = strategy.analyze([_market()])[0]
+    # analyze() only fires in the terminal window; use a synthetic signal with a
+    # distant end_date_ts so GTD expiration is valid under CLOB min-lead rules.
+    end_ts = time.time() + 3600.0
+    signal = Signal(
+        signal_type=SignalType.BUY,
+        token_id="token-1",
+        market_slug="btc-updown-1h-demo",
+        side="Up",
+        price=0.90,
+        size=5.0,
+        metadata={"end_date_ts": end_ts, "fee_rate_bps": 75},
+    )
 
     class DummyOrderManager:
         def __init__(self):

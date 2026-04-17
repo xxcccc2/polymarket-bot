@@ -29,6 +29,7 @@ from .config import (
     SCAN_INTERVAL_SECONDS,
     BALANCE_REFRESH_SECONDS,
     MARKET_REFRESH_SECONDS,
+    POSITIONS_SYNC_SECONDS,
     MAX_HOURS_TO_EXPIRY,
     SHORTTERM_NEAREST_CYCLE_ONLY,
     SHORTTERM_MAX_HOURS_AHEAD,
@@ -668,7 +669,7 @@ class PolymarketBot:
         last_market_refresh = 0
         last_sync = 0
         fill_check_interval = 30 if (ENABLE_USER_WEBSOCKET_FEED and not PAPER_TRADING) else 10
-        sync_interval = 120  # Sync order state with exchange every 2 min (catches missed fills)
+        sync_interval = POSITIONS_SYNC_SECONDS  # Sync order state + positions (catches missed fills, fixes drifted exposure)
         self._recent_trades_cache: List[Dict] = []  # shared with VPIN
         self._first_scan_done = False
         
@@ -1078,6 +1079,7 @@ class PolymarketBot:
                 )
             om_stats = self.order_manager.get_stats()
             om_filled = om_stats.get('total_filled', 0)
+            om_fill_events = om_stats.get('total_fill_events', om_filled)
             om_cancelled = om_stats.get('total_cancelled', 0)
             om_fill_rate = om_stats.get('fill_rate', 0) * 100
             max_orders = getattr(self.order_manager, 'max_active_orders', 10)
@@ -1110,6 +1112,7 @@ class PolymarketBot:
             active_orders=active_orders,
             max_orders=max_orders,
             filled=om_filled,
+            fill_events=om_fill_events,
             cancelled=om_cancelled,
             fill_rate=om_fill_rate,
             throttle=rm.get_throttle_factor() if rm.adaptive_enabled else 1.0,
@@ -1423,6 +1426,29 @@ class PolymarketBot:
                     if is_resolved:
                         quality_stats["resolved_tokens"] += 1
 
+                    tick_size = None
+                    if hasattr(self, "feed") and self.feed:
+                        tick_size = self.feed.tick_size_by_token.get(str(token_id))
+                    if not tick_size or tick_size <= 0:
+                        for key in (
+                            "orderPriceMinTickSize",
+                            "order_price_min_tick_size",
+                            "minimumTickSize",
+                            "minimum_tick_size",
+                        ):
+                            raw_ts = market.get(key)
+                            if raw_ts is None:
+                                continue
+                            try:
+                                tsv = float(raw_ts)
+                                if tsv > 0:
+                                    tick_size = tsv
+                                    break
+                            except (TypeError, ValueError):
+                                pass
+                    if not tick_size or tick_size <= 0:
+                        tick_size = 0.001
+
                     data = MarketData(
                         token_id=token_id,
                         condition_id=condition_id,
@@ -1449,6 +1475,7 @@ class PolymarketBot:
                         resolution_outcome=str(resolution_outcome).upper() if resolution_outcome not in (None, "") else None,
                         data_source_quality=data_source_quality,
                         quote_source="websocket" if ob_data else ("gamma" if has_real_quotes else "missing"),
+                        tick_size=tick_size,
                     )
                     
                     data_list.append(data)
@@ -2089,6 +2116,10 @@ class PolymarketBot:
             return None
 
         now_ts = time.time()
+        current_cycle_end_ts = _current_cycle_end_ts(now_ts, horizon)
+        if current_cycle_end_ts is not None and abs(end_ts - current_cycle_end_ts) > 90:
+            return "market is not in the current cycle"
+
         min_seconds_remaining = {
             "15m": ML_DIRECTIONAL_MIN_SECONDS_TO_EXPIRY_15M,
             "1h": ML_DIRECTIONAL_MIN_SECONDS_TO_EXPIRY_1H,

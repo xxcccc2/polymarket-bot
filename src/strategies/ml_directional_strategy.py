@@ -4,6 +4,7 @@ ML-informed directional strategy for Polymarket BTC Up/Down markets.
 
 from __future__ import annotations
 
+import math
 import re
 import time
 from collections import deque
@@ -28,7 +29,10 @@ from ..config import (
     ML_DIRECTIONAL_MODEL_PATH_15M,
     ML_DIRECTIONAL_MODEL_PATH_1H,
     ML_DIRECTIONAL_ONLY_CRYPTO,
+    ML_DIRECTIONAL_POST_ONLY,
+    ML_DIRECTIONAL_POST_ONLY_BUFFER_TICKS,
     ML_DIRECTIONAL_ROLLING_ACCURACY_WINDOW,
+    clob_gtd_expiration_unix,
     ML_DIRECTIONAL_SIGNAL_COOLDOWN_SECONDS,
     ML_DIRECTIONAL_SOFT_LOSS_STREAK,
     ML_DIRECTIONAL_SOFT_PAUSE_SECONDS,
@@ -73,6 +77,11 @@ class MLDirectionalStrategy(BaseStrategy):
         self.min_probability = float(self.config.get("min_probability", ML_DIRECTIONAL_MIN_PROBABILITY))
         self.min_edge = float(self.config.get("min_edge", ML_DIRECTIONAL_MIN_EDGE))
         self.maker_offset = float(self.config.get("maker_offset", ML_DIRECTIONAL_MAKER_OFFSET))
+        self.post_only = bool(self.config.get("post_only", ML_DIRECTIONAL_POST_ONLY))
+        self.post_only_buffer_ticks = max(
+            1,
+            int(self.config.get("post_only_buffer_ticks", ML_DIRECTIONAL_POST_ONLY_BUFFER_TICKS)),
+        )
         self.signal_cooldown_s = int(self.config.get("signal_cooldown_s", ML_DIRECTIONAL_SIGNAL_COOLDOWN_SECONDS))
         self.max_signals_per_cycle = int(self.config.get("max_signals_per_cycle", ML_DIRECTIONAL_MAX_SIGNALS_PER_CYCLE))
         self.feed_stale_seconds = int(self.config.get("feed_stale_seconds", ML_DIRECTIONAL_FEED_STALE_SECONDS))
@@ -223,8 +232,11 @@ class MLDirectionalStrategy(BaseStrategy):
                 horizon_blocks[horizon] = block_reason
                 continue
 
-            buy_price = min(data.best_bid + self.maker_offset, data.best_ask - 0.001)
-            buy_price = round(max(0.01, min(0.99, buy_price)), 3)
+            buy_price = self._maker_limit_buy_price(data)
+            if buy_price is None:
+                block_reason = "no post-only price (spread/tick)"
+                horizon_blocks[horizon] = block_reason
+                continue
             shares = round(max(0.0, bet_size_usd / buy_price), 2)
             if shares <= 0:
                 block_reason = "shares <= 0"
@@ -288,15 +300,16 @@ class MLDirectionalStrategy(BaseStrategy):
             if signal.signal_type != SignalType.BUY:
                 continue
             try:
+                gtd_exp = clob_gtd_expiration_unix(signal.metadata.get("end_date_ts"))
                 result = order_manager.place_limit_order(
                     token_id=signal.token_id,
                     side="BUY",
                     price=signal.price,
                     size=signal.size,
-                    order_type="GTD",
+                    order_type="GTD" if gtd_exp is not None else "GTC",
                     market_slug=signal.market_slug,
-                    expiration=self._order_expiration(signal.metadata.get("end_date_ts")),
-                    post_only=True,
+                    expiration=gtd_exp,
+                    post_only=self.post_only,
                     metadata={"strategy": self.name, **signal.metadata},
                 )
                 if result.get("success"):
@@ -484,6 +497,41 @@ class MLDirectionalStrategy(BaseStrategy):
             ordered.insert(0, target_timeframe)
         return ordered
 
+    def _maker_limit_buy_price(self, data: MarketData) -> Optional[float]:
+        """Limit price for BUY. Post-only must sit strictly below best ask (tick-aware)."""
+        if not self.post_only:
+            raw = min(data.best_bid + self.maker_offset, data.best_ask - 1e-4)
+            return round(max(0.01, min(0.99, raw)), 4)
+
+        tick = float(data.tick_size or 0.001)
+        tick = max(tick, 1e-4)
+        if data.best_ask <= 0:
+            return None
+        # Use an N-tick safety buffer below best ask so that a small downward
+        # move between signal generation and actual post_order submission does
+        # not cause Polymarket's CLOB to reject the order with
+        # "invalid post-only order: order crosses book". Configurable via
+        # ML_DIRECTIONAL_POST_ONLY_BUFFER_TICKS (default 2).
+        buffer_ticks = float(self.post_only_buffer_ticks)
+        ceiling = data.best_ask - (buffer_ticks * tick)
+        if ceiling < 0.01:
+            return None
+        bid_lift = data.best_bid + self.maker_offset
+        raw = min(bid_lift, ceiling)
+        if raw >= data.best_ask - 1e-12:
+            return None
+        # Require at least an N-tick spread so there is room for a safe maker price.
+        if data.spread < tick * buffer_ticks:
+            return None
+        steps = math.floor(raw / tick + 1e-12)
+        price = max(0.01, steps * tick)
+        max_steps = math.floor(ceiling / tick + 1e-12)
+        max_price = max(0.01, max_steps * tick)
+        price = min(price, max_price)
+        if price < 0.01 or price > ceiling + 1e-9:
+            return None
+        return float(round(price, 10))
+
     def _compute_threshold(self, market_price: float) -> float:
         adverse_selection = 0.01
         spread_cost = 0.005
@@ -632,17 +680,6 @@ class MLDirectionalStrategy(BaseStrategy):
         if not market_data.is_resolved or not market_data.resolution_outcome:
             return None
         return 1.0 if str(market_data.outcome).upper() == str(market_data.resolution_outcome).upper() else 0.0
-
-    @staticmethod
-    def _order_expiration(end_date_ts: Optional[float]) -> Optional[int]:
-        now_ts = time.time()
-        if end_date_ts:
-            candidate = min(float(end_date_ts) - 15.0, now_ts + 120.0)
-        else:
-            candidate = now_ts + 120.0
-        if candidate <= now_ts + 5:
-            return None
-        return int(candidate)
 
     def _rolling_accuracy(self) -> float:
         if not self._resolved_accuracy:
