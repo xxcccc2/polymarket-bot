@@ -256,6 +256,39 @@ class Dashboard:
         """Build the full dashboard as a Group of renderables."""
         return Group(
             self._render_header(s),
+            self._render_summary(s),
+            self._render_strategies(s.strategies),
+            self._render_strategy_details(s.strategy_details),
+            self._render_open_positions(s.open_positions),
+            Columns(
+                [self._render_open_orders(s.open_orders), self._render_recent_fills(s.recent_fills)],
+                equal=True,
+                expand=True,
+            ),
+            self._render_logs(),
+        )
+
+    def _render_summary(self, s: DashboardState):
+        width = self.console.size.width
+        if width >= 170:
+            grid = Table.grid(expand=True)
+            grid.add_column(ratio=3)
+            grid.add_column(ratio=4)
+            grid.add_column(ratio=3)
+            grid.add_row(
+                Group(
+                    self._render_btc(s.binance),
+                    self._render_risk_engine(s.risk_engine),
+                ),
+                self._render_portfolio(s.portfolio),
+                Group(
+                    self._render_execution_health(s.execution_health),
+                    self._render_market_quality(s.market_quality),
+                ),
+            )
+            return grid
+
+        return Group(
             Columns(
                 [
                     self._render_btc(s.binance),
@@ -270,15 +303,6 @@ class Dashboard:
                 equal=True,
                 expand=True,
             ),
-            self._render_strategies(s.strategies),
-            self._render_strategy_details(s.strategy_details),
-            self._render_open_positions(s.open_positions),
-            Columns(
-                [self._render_open_orders(s.open_orders), self._render_recent_fills(s.recent_fills)],
-                equal=True,
-                expand=True,
-            ),
-            self._render_logs(),
         )
 
     # -- panels -------------------------------------------------------------
@@ -352,8 +376,7 @@ class Dashboard:
             return "[green]OK[/]" if ok else "[red]DOWN[/]"
 
         lines = [
-            f"Market WS {_badge(h.market_ws_connected)}  |  User WS {_badge(h.user_ws_connected, na=h.paper_mode)}",
-            f"Binance  {_badge(h.binance_connected)}",
+            f"Market WS {_badge(h.market_ws_connected)}  |  User WS {_badge(h.user_ws_connected, na=h.paper_mode)}  |  Binance {_badge(h.binance_connected)}",
             f"Market evt {Dashboard._fmt_age(h.last_market_event_age)}  |  User evt {Dashboard._fmt_age(h.last_user_event_age, na=h.paper_mode)}",
             f"Positions {Dashboard._fmt_age(h.positions_age)}  |  Last fill {Dashboard._fmt_age(h.last_fill_age)}",
         ]
@@ -374,11 +397,10 @@ class Dashboard:
         sigma_txt = f"{r.sigma_avg:.2f}" if r.sigma_avg > 0 else "—"
 
         lines = [
-            f"Engine: [{engine_style}]{r.engine_label}[/]",
+            f"Engine: [{engine_style}]{r.engine_label}[/]  |  Markets: {r.active_markets}",
             f"Portfolio Delta: [{delta_style}]{r.net_delta:+.4f}[/]  "
             f"Gamma: [{gamma_style}]{r.net_gamma:+.4f}[/]",
-            f"Markets: {r.active_markets}  Avg σ: {sigma_txt}",
-            f"Shock Test: {shock_txt}  Kelly Scale: {r.kelly_scale:.2f}",
+            f"Avg σ: {sigma_txt}  |  Shock: {shock_txt}  |  Kelly: {r.kelly_scale:.2f}",
         ]
         body = Text.from_markup("\n".join(lines))
         return Panel(body, title="Risk Engine", border_style="magenta", box=box.ROUNDED)
@@ -389,8 +411,7 @@ class Dashboard:
         real_pct = (q.real_quote_tokens / total) * 100
         lines = [
             f"Real quotes  {q.real_quote_tokens}/{q.total_tokens} ({real_pct:.0f}%)",
-            f"Missing     {q.missing_quote_tokens}",
-            f"No orders   {q.not_accepting_orders}",
+            f"Missing {q.missing_quote_tokens}  |  No orders {q.not_accepting_orders}",
             f"Resolved    {q.resolved_tokens}",
             f"Eligible    ML {q.eligible_ml} | Term {q.eligible_terminal} | Combo {q.eligible_combo}",
         ]
