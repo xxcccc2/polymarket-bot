@@ -603,7 +603,14 @@ class PolymarketClient:
             cprint(f"Failed to fetch markets page: {e}", "red")
             return {"error": str(e)}
 
-    def get_events(self, limit: int = 50, max_pages: Optional[int] = None, offset: int = 0) -> List[Dict]:
+    def get_events(
+        self,
+        limit: int = 50,
+        max_pages: Optional[int] = None,
+        offset: int = 0,
+        order: str = "startDate",
+        ascending: bool = False,
+    ) -> List[Dict]:
         """
         Fetch active events from Gamma API (includes 5-min crypto markets).
         
@@ -626,8 +633,8 @@ class PolymarketClient:
                     "active": "true",
                     "limit": limit,
                     "offset": current_offset,
-                    "order": "startDate",
-                    "ascending": "false",
+                    "order": order,
+                    "ascending": "true" if ascending else "false",
                 }
 
                 def _request():

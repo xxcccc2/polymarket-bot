@@ -147,6 +147,7 @@ class BaseStrategy(ABC):
         self.signals_generated = 0
         self.trades_executed = 0
         self.pnl = 0.0
+        self._last_scan_status = "idle"
         
     @abstractmethod
     def analyze(self, market_data: List[MarketData]) -> List[Signal]:

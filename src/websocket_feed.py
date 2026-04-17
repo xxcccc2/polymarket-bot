@@ -198,20 +198,26 @@ class WebSocketFeed:
         Args:
             token_ids: List of token IDs to subscribe to
         """
+        new_token_ids: List[str] = []
         for token_id in token_ids:
-            self.subscribed_tokens.add(token_id)
+            if token_id not in self.subscribed_tokens:
+                self.subscribed_tokens.add(token_id)
+                new_token_ids.append(token_id)
         
         # If already connected, send subscription
-        if self.is_connected and self.ws:
-            self._send_subscription(token_ids)
-    
+        if self.is_connected and self.ws and new_token_ids:
+            self._send_subscription(new_token_ids)
+
     def unsubscribe(self, token_ids: List[str]):
         """Unsubscribe from market updates."""
+        removed_token_ids: List[str] = []
         for token_id in token_ids:
-            self.subscribed_tokens.discard(token_id)
+            if token_id in self.subscribed_tokens:
+                self.subscribed_tokens.discard(token_id)
+                removed_token_ids.append(token_id)
         
-        if self.is_connected and self.ws:
-            self._send_unsubscription(token_ids)
+        if self.is_connected and self.ws and removed_token_ids:
+            self._send_unsubscription(removed_token_ids)
     
     def _send_subscription(self, token_ids: List[str]):
         """Send subscription message to WebSocket."""

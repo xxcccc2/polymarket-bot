@@ -5,6 +5,7 @@ ML-informed directional strategy for Polymarket BTC Up/Down markets.
 from __future__ import annotations
 
 import math
+import os
 import re
 import time
 from collections import deque
@@ -75,6 +76,7 @@ class MLDirectionalStrategy(BaseStrategy):
             value.lower() for value in self.config.get("enabled_horizons", ML_DIRECTIONAL_ENABLED_HORIZONS)
         }
         self.min_probability = float(self.config.get("min_probability", ML_DIRECTIONAL_MIN_PROBABILITY))
+        self._explicit_min_probability_override = "ML_DIRECTIONAL_MIN_PROBABILITY" in os.environ
         self.min_edge = float(self.config.get("min_edge", ML_DIRECTIONAL_MIN_EDGE))
         self.maker_offset = float(self.config.get("maker_offset", ML_DIRECTIONAL_MAKER_OFFSET))
         self.post_only = bool(self.config.get("post_only", ML_DIRECTIONAL_POST_ONLY))
@@ -221,7 +223,11 @@ class MLDirectionalStrategy(BaseStrategy):
 
             threshold = max(self.min_edge, self._compute_threshold(data.mid_price))
             edge = outcome_probability - data.mid_price
-            if outcome_probability < model_threshold or edge <= threshold:
+            if outcome_probability < model_threshold:
+                block_reason = f"prob {outcome_probability*100:.1f}c < {model_threshold*100:.1f}c"
+                horizon_blocks[horizon] = block_reason
+                continue
+            if edge <= threshold:
                 block_reason = f"edge {edge*100:.1f}c < {threshold*100:.1f}c"
                 horizon_blocks[horizon] = block_reason
                 continue
@@ -377,6 +383,8 @@ class MLDirectionalStrategy(BaseStrategy):
                 "paused_until": self._paused_until,
                 "halt_reason": self._halt_reason,
                 "pending_resolutions": len(self._pending_resolutions),
+                "resolved_accuracy_samples": len(self._resolved_accuracy),
+                "resolved_brier_samples": len(self._resolved_brier),
                 "positions": self.positions,
                 "active_conditions": len(self.active_condition_ids),
                 "horizon_stats": {
@@ -390,6 +398,8 @@ class MLDirectionalStrategy(BaseStrategy):
                         "rolling_accuracy": rolling_accuracy,
                         "rolling_brier": rolling_brier,
                         "pending_resolutions": len(self._pending_resolutions),
+                        "resolved_accuracy_samples": len(self._resolved_accuracy),
+                        "resolved_brier_samples": len(self._resolved_brier),
                         "halt_reason": self._halt_reason,
                     }
                     for horizon in sorted(self.enabled_horizons or {"15m", "1h"})
@@ -536,7 +546,7 @@ class MLDirectionalStrategy(BaseStrategy):
         adverse_selection = 0.01
         spread_cost = 0.005
         missed_fill_penalty = 0.005
-        calibration_buffer = 0.01
+        calibration_buffer = 0.005
         return adverse_selection + spread_cost + missed_fill_penalty + calibration_buffer
 
     def _size_bet(self, estimated_prob: float, market_price: float, token_id: str) -> float:
@@ -613,7 +623,12 @@ class MLDirectionalStrategy(BaseStrategy):
                 if model.artifact:
                     self._model_versions_by_horizon[current_horizon] = model.artifact.version
                     self._feature_columns_by_horizon[current_horizon] = list(model.artifact.feature_columns)
-                    self._model_thresholds_by_horizon[current_horizon] = float(model.artifact.threshold_probability)
+                    artifact_threshold = float(model.artifact.threshold_probability)
+                    self._model_thresholds_by_horizon[current_horizon] = (
+                        self.min_probability
+                        if self._explicit_min_probability_override
+                        else artifact_threshold
+                    )
                 else:
                     self._model_versions_by_horizon[current_horizon] = "legacy"
                     self._feature_columns_by_horizon[current_horizon] = list(DEFAULT_RUNTIME_FEATURE_COLUMNS)
