@@ -19,7 +19,7 @@ from dataclasses import replace
 from typing import Dict, List, Optional, Type
 from datetime import datetime
 
-from .logging_utils import cprint, set_dashboard_mode
+from .logging_utils import cprint, get_session_log_path, set_dashboard_mode
 from .dashboard import (
     Dashboard, DashboardState, BinanceSnapshot,
     StrategyRow, PortfolioSnapshot, ExecutionHealthSnapshot,
@@ -35,7 +35,7 @@ from .config import (
     SHORTTERM_MAX_HOURS_AHEAD,
     ENABLE_WEBSOCKET_FEED,
     ENABLE_USER_WEBSOCKET_FEED,
-    ENABLE_BTC_5MIN,
+    ENABLE_CRYPTO_EVENT_INFRA,
     TERMINAL_CONVERGENCE_1H_ONLY,
     PAPER_TRADING,
     CRYPTO_MARKET_KEYWORDS,
@@ -382,7 +382,7 @@ class PolymarketBot:
 
         # Binance feed for cross-asset strategies
         self.binance_feed: Optional[BinanceFeed] = None
-        if ENABLE_BTC_5MIN:
+        if ENABLE_CRYPTO_EVENT_INFRA:
             feed_symbols = (
                 list(ML_DIRECTIONAL_LEAN_BINANCE_SYMBOLS or ["btcusdt"])
                 if self.ml_directional_lean_mode
@@ -427,7 +427,7 @@ class PolymarketBot:
         if self.multi_strategy_mode:
             cprint("Loading ALL strategies (multi-strategy mode)", "cyan", attrs=["bold"])
             strat_names = list(_CLASSIC_STRATEGIES)
-            if ENABLE_BTC_5MIN and self.binance_feed:
+            if ENABLE_CRYPTO_EVENT_INFRA and self.binance_feed:
                 strat_names.extend(_BTC_5MIN_STRATEGIES)
                 strat_names.extend(_ML_STRATEGIES)
             strat_names.extend(_ADVANCED_STRATEGIES)
@@ -577,6 +577,9 @@ class PolymarketBot:
             syms = getattr(self.binance_feed, "symbols", ["btcusdt"])
             sym_str = ",".join(s.upper() for s in syms)
             cprint(f"Binance Feed: {sym_str}", "cyan")
+        session_log_path = get_session_log_path()
+        if session_log_path:
+            cprint(f"Session Log: {session_log_path}", "cyan")
         if self.risk_manager.adaptive_enabled:
             cprint("Adaptive Risk: bankroll-proportional", "cyan")
         cprint("\nPress Ctrl+C to stop\n", "yellow")
@@ -1606,8 +1609,8 @@ class PolymarketBot:
             if self.ml_directional_lean_mode:
                 cprint(f"lean market scan inspected {scanned_market_count} /markets entries", "dark_grey")
             
-            # Also fetch events (5-min BTC markets live here, not in /markets)
-            if ENABLE_BTC_5MIN:
+            # Also fetch crypto event markets from /events when event infra is enabled.
+            if ENABLE_CRYPTO_EVENT_INFRA:
                 event_limit = 100
                 events = []
                 scanned_events = 0

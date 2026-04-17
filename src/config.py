@@ -173,10 +173,14 @@ CRYPTO_MARKET_KEYWORDS = [
 ]
 
 # =============================================================================
-# 5-MINUTE BTC MARKET SETTINGS
+# CRYPTO EVENT / BINANCE INFRA SETTINGS
 # =============================================================================
-# Enable 5-min BTC market strategies
-ENABLE_BTC_5MIN = os.getenv("ENABLE_BTC_5MIN", "true").lower() == "true"
+# Enables Binance price-feed infra plus crypto event-market discovery used by
+# short-term BTC strategies and ml_directional. Falls back to legacy ENABLE_BTC_5MIN.
+ENABLE_CRYPTO_EVENT_INFRA = os.getenv(
+    "ENABLE_CRYPTO_EVENT_INFRA",
+    os.getenv("ENABLE_BTC_5MIN", "true"),
+).lower() == "true"
 
 # Block orders on markets that resolve in more than this many hours (0 = disabled)
 MAX_HOURS_TO_EXPIRY = float(os.getenv("MAX_HOURS_TO_EXPIRY", "1"))
@@ -642,8 +646,8 @@ def print_config():
     cprint(f"  Markets: {'Crypto only' if ONLY_CRYPTO_MARKETS else 'ALL markets (political, sports, crypto)'}", "cyan" if not ONLY_CRYPTO_MARKETS else "white")
     cprint(f"  Log Level: {LOG_LEVEL}", "white")
     
-    if ENABLE_BTC_5MIN:
-        cprint("\n5-Min BTC Settings:", "cyan")
+    if ENABLE_CRYPTO_EVENT_INFRA:
+        cprint("\nCrypto Event / Binance Settings:", "cyan")
         cprint(f"  Min BTC Move: {BTC_MIN_MOVE_PCT}%", "white")
         cprint(f"  Reaction Window: {BTC_REACTION_WINDOW_SECONDS}s", "white")
         cprint(f"  Terminal Window: {TERMINAL_CONVERGENCE_WINDOW_SECONDS}s", "white")

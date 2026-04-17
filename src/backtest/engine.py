@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from ..config import ENABLE_BTC_5MIN, TERMINAL_CONVERGENCE_WINDOW_SECONDS
+from ..config import ENABLE_CRYPTO_EVENT_INFRA, TERMINAL_CONVERGENCE_WINDOW_SECONDS
 from ..logging_utils import cprint
 from ..strategies.terminal_convergence_strategy import TerminalConvergenceStrategy
 
@@ -82,8 +82,8 @@ class BacktestEngine:
         if strategy_name != "terminal_convergence":
             raise ValueError(f"Unsupported strategy: {strategy_name}")
 
-        if not ENABLE_BTC_5MIN:
-            cprint("  ENABLE_BTC_5MIN is False, enabling for backtest", "yellow")
+        if not ENABLE_CRYPTO_EVENT_INFRA:
+            cprint("  ENABLE_CRYPTO_EVENT_INFRA is False, enabling for backtest", "yellow")
 
         markets = self.store.load_markets(
             market_type=market_type,

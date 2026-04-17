@@ -31,7 +31,7 @@ from ..config import (
     ORDER_SIZE_USD,
     MAX_POSITION_USD,
     TRADING_FEE_RATE,
-    ENABLE_BTC_5MIN,
+    ENABLE_CRYPTO_EVENT_INFRA,
 )
 
 
@@ -76,7 +76,7 @@ class CrossAssetStrategy(BaseStrategy):
 
     def should_trade_market(self, market_data: MarketData) -> bool:
         """Only trade 5-min BTC markets."""
-        if not ENABLE_BTC_5MIN:
+        if not ENABLE_CRYPTO_EVENT_INFRA:
             return False
 
         text = f"{market_data.question} {market_data.market_slug}".lower()

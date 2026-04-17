@@ -85,7 +85,7 @@ In the final 60–120 seconds of a crypto Up/Down market, the price **must** con
 ## Dependencies
 
 - **BinanceFeed** must be connected (WebSocket)
-- **`ENABLE_BTC_5MIN=true`**
+- **`ENABLE_CRYPTO_EVENT_INFRA=true`**
 - Markets must have `end_date_ts` for time-to-expiry
 
 ---

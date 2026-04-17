@@ -38,7 +38,7 @@ from ..config import (
     ORDER_SIZE_USD,
     MAX_POSITION_USD,
     TRADING_FEE_RATE,
-    ENABLE_BTC_5MIN,
+    ENABLE_CRYPTO_EVENT_INFRA,
     clob_gtd_expiration_unix,
 )
 
@@ -98,7 +98,7 @@ class TerminalConvergenceStrategy(BaseStrategy):
 
     def should_trade_market(self, market_data: MarketData) -> bool:
         """Trade crypto 1h Up/Down markets within the convergence window (near expiry)."""
-        if not ENABLE_BTC_5MIN:
+        if not ENABLE_CRYPTO_EVENT_INFRA:
             return False
 
         text = f"{market_data.question} {market_data.market_slug}".lower()
