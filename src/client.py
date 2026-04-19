@@ -1113,14 +1113,19 @@ class PolymarketClient:
             cprint(f"❌ Failed to fetch trades: {error_msg}", "red")
             return []
 
-    def get_positions(self, limit: int = 100) -> List[Dict]:
-        """Get current positions from Data API (ground truth for exposure)."""
+    def get_positions(self, limit: int = 100) -> Optional[List[Dict]]:
+        """Get current positions from Data API (ground truth for exposure).
+
+        Returns ``None`` on fetch failure so callers can distinguish between
+        "API error" and "authoritative empty positions snapshot".
+        """
         if PAPER_TRADING or not PROXY_ADDRESS:
             return []
         try:
-            return get_positions(PROXY_ADDRESS, limit=limit)
+            positions = get_positions(PROXY_ADDRESS, limit=limit)
+            return positions if isinstance(positions, list) else []
         except Exception:
-            return []
+            return None
 
     def get_balance_diagnostics(self) -> Dict[str, Any]:
         """Resolve live balance and expose which source produced it."""

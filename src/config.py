@@ -25,14 +25,18 @@ PUBLIC_CONFIG_FILE = os.getenv(
     "BOT_PUBLIC_CONFIG_FILE",
     str(PROJECT_ROOT / "config" / "bot.public.env"),
 )
+ACTIVE_CONFIG_SOURCE_PATH = (os.getenv("BOT_CONFIG_SOURCE_PATH") or "").strip()
+PRIVATE_CONFIG_FILE = str(PROJECT_ROOT / '.env')
+PUBLIC_CONFIG_FILE_LOADED = False
 if Path(PUBLIC_CONFIG_FILE).exists():
     load_dotenv(dotenv_path=PUBLIC_CONFIG_FILE, override=False)
+    PUBLIC_CONFIG_FILE_LOADED = True
 elif os.getenv("BOT_PUBLIC_CONFIG_FILE"):
     # User explicitly pointed to a shared config path that doesn't exist.
     # Log loudly to avoid silent fallback to defaults.
     print(f"⚠️  BOT_PUBLIC_CONFIG_FILE not found: {PUBLIC_CONFIG_FILE}")
 # Keep shell/exported vars as highest priority (important for BOT_WALLET_ID=... runs).
-load_dotenv(dotenv_path=PROJECT_ROOT / '.env', override=False)
+load_dotenv(dotenv_path=PRIVATE_CONFIG_FILE, override=False)
 
 # =============================================================================
 # POLYMARKET API SETTINGS
@@ -246,6 +250,7 @@ KELLY_FRACTION_MODE = os.getenv("KELLY_FRACTION_MODE", "half")
 KELLY_MAX_BET_FRACTION = float(os.getenv("KELLY_MAX_BET_FRACTION", "0.05"))
 # Minimum edge required before Kelly sizes a bet (below this → skip)
 KELLY_MIN_EDGE = float(os.getenv("KELLY_MIN_EDGE", "0.01"))
+ML_DIRECTIONAL_KELLY_ENABLED = os.getenv("ML_DIRECTIONAL_KELLY_ENABLED", "true").lower() == "true"
 
 # =============================================================================
 # bs-p NATIVE ENGINE (Avellaneda-Stoikov quoting + analytics)
@@ -496,6 +501,7 @@ ML_DIRECTIONAL_POST_ONLY = os.getenv("ML_DIRECTIONAL_POST_ONLY", "true").lower()
 ML_DIRECTIONAL_POST_ONLY_BUFFER_TICKS = max(1, int(os.getenv("ML_DIRECTIONAL_POST_ONLY_BUFFER_TICKS", "2")))
 ML_DIRECTIONAL_SIGNAL_COOLDOWN_SECONDS = int(os.getenv("ML_DIRECTIONAL_SIGNAL_COOLDOWN_SECONDS", "45"))
 ML_DIRECTIONAL_MAX_SIGNALS_PER_CYCLE = int(os.getenv("ML_DIRECTIONAL_MAX_SIGNALS_PER_CYCLE", "2"))
+ML_DIRECTIONAL_GTD_MAX_HORIZON_SECONDS = int(os.getenv("ML_DIRECTIONAL_GTD_MAX_HORIZON_SECONDS", "240"))
 ML_DIRECTIONAL_ATR_HALT_PERCENTILE = float(os.getenv("ML_DIRECTIONAL_ATR_HALT_PERCENTILE", "0.95"))
 ML_DIRECTIONAL_FEED_STALE_SECONDS = int(os.getenv("ML_DIRECTIONAL_FEED_STALE_SECONDS", "10"))
 ML_DIRECTIONAL_MIN_SECONDS_TO_EXPIRY_15M = int(os.getenv("ML_DIRECTIONAL_MIN_SECONDS_TO_EXPIRY_15M", "60"))
@@ -623,6 +629,13 @@ def print_config():
     cprint("\n" + "="*60, "cyan")
     cprint("Bot Configuration", "cyan", attrs=["bold"])
     cprint("="*60, "cyan")
+    if ACTIVE_CONFIG_SOURCE_PATH:
+        cprint(f"  Active Config Source: {ACTIVE_CONFIG_SOURCE_PATH}", "white")
+    cprint(
+        f"  Public Config File: {PUBLIC_CONFIG_FILE if PUBLIC_CONFIG_FILE_LOADED else f'{PUBLIC_CONFIG_FILE} (not loaded)'}",
+        "white",
+    )
+    cprint(f"  Private Config File: {PRIVATE_CONFIG_FILE}", "white")
     
     cprint(f"  Private Key: {'*' * 10}...{PRIVATE_KEY[-4:] if PRIVATE_KEY else 'NOT SET'}", "yellow")
     cprint(f"  Proxy Address: {PROXY_ADDRESS[:10]}...{PROXY_ADDRESS[-4:] if PROXY_ADDRESS else 'NOT SET'}", "yellow")
@@ -660,6 +673,7 @@ def print_config():
         cprint(f"  Horizons: {', '.join(ML_DIRECTIONAL_LEAN_HORIZONS)}", "white")
         cprint(f"  Events Only: {'ON' if ML_DIRECTIONAL_LEAN_EVENTS_ONLY else 'OFF'}", "white")
         cprint(f"  Binance Symbols: {', '.join(ML_DIRECTIONAL_LEAN_BINANCE_SYMBOLS)}", "white")
+        cprint(f"  ML Directional GTD Horizon: {ML_DIRECTIONAL_GTD_MAX_HORIZON_SECONDS}s", "white")
         cprint(
             f"  Min Entry Time Left: 15m={ML_DIRECTIONAL_MIN_SECONDS_TO_EXPIRY_15M}s, "
             f"1h={ML_DIRECTIONAL_MIN_SECONDS_TO_EXPIRY_1H}s",

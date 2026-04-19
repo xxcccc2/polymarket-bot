@@ -737,8 +737,10 @@ class PolymarketBot:
                             self.order_manager.sync_with_exchange()
                         # Sync exposure from Data API positions (ground truth, not fill-derived)
                         positions = self.client.get_positions(limit=150)
-                        if positions:
+                        if positions is not None:
                             self.risk_manager.sync_positions_from_api(positions)
+                        else:
+                            cprint("positions sync skipped: API fetch failed", "yellow")
                         last_sync = time.time()
                         self._last_positions_sync_ts = time.time()
                     except Exception as e:
@@ -1039,6 +1041,27 @@ class PolymarketBot:
                         if brier_samples > 0
                         else "—"
                     )
+                    sizing_debug = horizon_state.get("sizing_debug", {}) or {}
+                    sizing_detail = ""
+                    if sizing_debug:
+                        bankroll_val = sizing_debug.get("bankroll")
+                        bet_size_val = sizing_debug.get("bet_size_usd")
+                        mode_val = sizing_debug.get("mode") or "—"
+                        risk_limit_val = sizing_debug.get("risk_limit_usd")
+                        native_sized = bool(sizing_debug.get("native_sized"))
+                        kelly_enabled = sizing_debug.get("kelly_enabled")
+                        bankroll_txt = f"${float(bankroll_val):.2f}" if bankroll_val not in (None, "") else "—"
+                        bet_size_txt = f"${float(bet_size_val):.2f}" if bet_size_val not in (None, "") else "—"
+                        risk_limit_txt = (
+                            f"${float(risk_limit_val):.2f}"
+                            if risk_limit_val not in (None, "")
+                            else "—"
+                        )
+                        sizing_label = "kelly" if kelly_enabled is not False else "fixed"
+                        sizing_detail = (
+                            f" | {sizing_label} {mode_val} {bet_size_txt} "
+                            f"(bankroll {bankroll_txt}, limit {risk_limit_txt}, native {'Y' if native_sized else 'N'})"
+                        )
                     strat_rows.append(StrategyRow(
                         name=f"{strat.name}:{horizon}",
                         signals=int(horizon_state.get("signals", 0) or 0),
@@ -1058,6 +1081,7 @@ class PolymarketBot:
                                 f"brier {brier_display} | "
                                 f"pending {int(horizon_state.get('pending_resolutions', 0) or 0)} | "
                                 f"eligible {eligible_counts.get(f'ml_directional:{horizon}', 0)}"
+                                f"{sizing_detail}"
                             ),
                         )
                     )
@@ -2738,7 +2762,28 @@ class PolymarketBot:
                     order.updated_at = datetime.now()
                     self.order_manager._persist_order(order)
             if raw_status in {"CANCELED", "CANCELLED"} or raw_type in {"CANCELLATION", "CANCEL"}:
-                self.order_manager.mark_order_cancelled(order.order_id, "Exchange/user channel cancellation")
+                submitted_expiration = (order.metadata or {}).get("submitted_expiration") if order.metadata else None
+                raw_reason = (
+                    update.raw.get("reason")
+                    or update.raw.get("cancel_reason")
+                    or update.raw.get("message")
+                    or update.raw.get("error")
+                    or ""
+                )
+                detail_bits = [
+                    f"type={raw_type or 'unknown'}",
+                    f"status={raw_status or 'unknown'}",
+                ]
+                if submitted_expiration:
+                    detail_bits.append(f"exp={submitted_expiration}")
+                if raw_reason:
+                    detail_bits.append(f"reason={raw_reason}")
+                if update.raw.get("expiration"):
+                    detail_bits.append(f"raw_exp={update.raw.get('expiration')}")
+                if update.raw.get("order_type"):
+                    detail_bits.append(f"raw_order_type={update.raw.get('order_type')}")
+                cancel_reason = f"Exchange/user channel cancellation ({', '.join(detail_bits)})"
+                self.order_manager.mark_order_cancelled(order.order_id, cancel_reason)
         except Exception as e:
             cprint(f"user order update error: {e}", "yellow")
 

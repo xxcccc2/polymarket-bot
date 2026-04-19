@@ -322,6 +322,10 @@ class OrderManager:
         
         if result.get("success"):
             order_id = result.get("order_id", f"unknown_{int(time.time()*1000)}")
+            metadata.setdefault("submitted_expiration", expiration)
+            metadata.setdefault("submitted_order_type", order_type)
+            if result.get("result") is not None:
+                metadata["placement_result"] = result.get("result")
             
             # Create order record
             order = Order(
@@ -507,6 +511,9 @@ class OrderManager:
         if result.get("success") or PAPER_TRADING:
             order.status = OrderStatus.CANCELLED
             order.updated_at = datetime.now()
+            if order.metadata is None:
+                order.metadata = {}
+            order.metadata["cancel_reason"] = reason
             self.total_orders_cancelled += 1
             
             # Notify callbacks
@@ -525,13 +532,16 @@ class OrderManager:
         """Mark an order cancelled locally without sending another exchange request."""
         order = self.orders.get(order_id)
         if not order:
-            return {"success": False, "error": "Order not found"}
+            return {"success": False, "error": f"Unknown order: {order_id}"}
         if not order.is_active:
             return {"success": False, "error": f"Order not active: {order.status.value}"}
-
         order.status = OrderStatus.CANCELLED
         order.updated_at = datetime.now()
+        if order.metadata is None:
+            order.metadata = {}
+        order.metadata["cancel_reason"] = reason
         self.total_orders_cancelled += 1
+        self._persist_order(order)
         for callback in self._cancel_callbacks:
             try:
                 callback(order, reason)

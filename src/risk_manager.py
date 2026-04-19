@@ -398,8 +398,6 @@ class RiskManager:
         Replace local positions with ground truth from Polymarket Data API.
         Call periodically to fix exposure when fill detection misses trades.
         """
-        if not api_positions:
-            return
         old_token_ids = set(self.positions.keys())
         self.positions.clear()
         for p in api_positions:
