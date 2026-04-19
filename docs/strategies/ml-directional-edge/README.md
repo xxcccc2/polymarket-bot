@@ -51,11 +51,22 @@ That matches the master plan exactly: establish the OHLCV baseline first, then a
   - `ml_directional_1h_ohlc_full.pkl`
   - `ml_directional_4h_ohlc_full.pkl`
   - `ml_directional_1d_ohlc_full.pkl`
+- Additional 1h recent-window challengers were trained with the same OHLC-only 1h feature recipe:
+  - `ml_directional_1h_ohlc_2022_2026.pkl`
+  - `ml_directional_1h_ohlc_2024_2026.pkl`
 - Current ranking after training the upgraded OHLC artifacts:
   - `15m_full` — strongest current candidate
   - `1h_full` — second-best candidate
   - `4h_full` — viable research artifact, weaker than 15m/1h
   - `1d_full` — weak current candidate, not a live favorite
+- Result of the 1h recent-window challenger test:
+  - `1h_full` still leads the 1h cohort
+  - `1h_2022_2026` was respectable but weaker than `1h_full`
+  - `1h_2024_2026` was weaker still
+- Recent-window 1h metrics snapshot:
+  - `1h_full` — accuracy `0.700`, Brier `0.198`, net EV/trade `0.440`, profit factor `2.60`
+  - `1h_2022_2026` — accuracy `0.691`, Brier `0.202`, net EV/trade `0.413`, profit factor `2.44`
+  - `1h_2024_2026` — accuracy `0.679`, Brier `0.207`, net EV/trade `0.392`, profit factor `2.30`
 - The fair overlap comparison currently favors OHLC-only over OHLC + micro on the March-April 2026 window.
 - Until a later comparison proves otherwise, improve the OHLC baseline first and only revisit microstructure after that baseline is fully evaluated.
 
@@ -171,6 +182,20 @@ What it does:
 - selects a sensible default timeframe stack for the chosen target horizon
 - runs walk-forward training
 - exports an artifact to the path you provide
+
+### 4. Train 1h recent-window challengers
+
+```bash
+./.venv/bin/python -m scripts.train_ml_directional --target-timeframe 1h --start-date 2022-01-01 --artifact-path data/ml/artifacts/ml_directional_1h_ohlc_2022_2026.pkl
+./.venv/bin/python -m scripts.train_ml_directional --target-timeframe 1h --start-date 2024-01-01 --artifact-path data/ml/artifacts/ml_directional_1h_ohlc_2024_2026.pkl
+```
+
+What it does:
+
+- keeps the same default 1h timeframe stack (`1h,4h,1d`)
+- keeps the same walk-forward defaults used by the baseline trainer
+- restricts the training rows to the requested recent window before training
+- produces challenger artifacts for direct comparison against `ml_directional_1h_ohlc_full.pkl`
 
 Default frame stacks by target:
 

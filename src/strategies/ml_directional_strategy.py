@@ -233,9 +233,15 @@ class MLDirectionalStrategy(BaseStrategy):
             outcome_probability = float(inference["probability"])
             model_threshold = float(inference["threshold_probability"])
             model_version = str(inference["model_version"])
+            buy_price = self._maker_limit_buy_price(data)
+            if buy_price is None:
+                block_reason = "no post-only price (spread/tick)"
+                horizon_blocks[horizon] = block_reason
+                continue
 
-            threshold = max(self.min_edge, self._compute_threshold(data.mid_price))
-            edge = outcome_probability - data.mid_price
+            threshold = max(self.min_edge, self._compute_threshold(buy_price))
+            mid_edge = outcome_probability - data.mid_price
+            edge = outcome_probability - buy_price
             if outcome_probability < model_threshold:
                 block_reason = f"prob {outcome_probability*100:.1f}c < {model_threshold*100:.1f}c"
                 horizon_blocks[horizon] = block_reason
@@ -245,15 +251,9 @@ class MLDirectionalStrategy(BaseStrategy):
                 horizon_blocks[horizon] = block_reason
                 continue
 
-            bet_size_usd = self._size_bet(outcome_probability, data.mid_price, data.token_id, horizon=horizon)
+            bet_size_usd = self._size_bet(outcome_probability, buy_price, data.token_id, horizon=horizon)
             if bet_size_usd <= 0:
                 block_reason = self._zero_size_block_reason(horizon)
-                horizon_blocks[horizon] = block_reason
-                continue
-
-            buy_price = self._maker_limit_buy_price(data)
-            if buy_price is None:
-                block_reason = "no post-only price (spread/tick)"
                 horizon_blocks[horizon] = block_reason
                 continue
             cancel_block_reason = self._recent_cancel_block_reason(
@@ -283,12 +283,17 @@ class MLDirectionalStrategy(BaseStrategy):
                 confidence=round(min(max(outcome_probability, 0.5), 0.99), 3),
                 reason=(
                     f"ML directional {horizon}: prob={outcome_probability:.3f} "
-                    f"mkt={data.mid_price:.3f} edge={edge*100:.1f}c"
+                    f"mkt={data.mid_price:.3f} px={buy_price:.3f} "
+                    f"mid_edge={mid_edge*100:.1f}c entry_edge={edge*100:.1f}c"
                 ),
                 metadata={
                     "strategy": self.name,
                     "predicted_prob": round(outcome_probability, 6),
                     "edge": round(edge, 6),
+                    "entry_edge": round(edge, 6),
+                    "mid_edge": round(mid_edge, 6),
+                    "market_mid_price": round(float(data.mid_price), 6),
+                    "buy_price": round(float(buy_price), 6),
                     "threshold": round(threshold, 6),
                     "horizon": horizon,
                     "model_version": model_version,

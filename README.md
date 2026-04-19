@@ -197,14 +197,17 @@ The `ml_directional` strategy is split into:
 
 | Artifact | Target | Type | Accuracy | Brier | Net EV/trade | Profit Factor |
 |----------|--------|------|----------|-------|-------------|---------------|
-| `ml_directional_15m_ohlc_full.pkl` | 15m | OHLC full-history | 0.720 | 0.189 | 0.479 | 2.85 |
-| `ml_directional_1h_ohlc_full.pkl` | 1h | OHLC full-history | 0.700 | 0.198 | 0.440 | 2.60 |
-| `ml_directional_4h_ohlc_full.pkl` | 4h | OHLC full-history | 0.640 | 0.228 | 0.307 | 1.92 |
-| `ml_directional_1d_ohlc_full.pkl` | 1d | OHLC full-history | 0.513 | 0.312 | 0.027 | 1.12 |
-| `ml_directional_15m_ohlc_overlap.pkl` | 15m | OHLC (Mar–Apr window) | — | — | — | — |
-| `ml_directional_15m_micro_overlap.pkl` | 15m | OHLC + microstructure | 0.596 | 0.258 | 0.195 | 1.48 |
+| `ml_directional_15m_ohlc_full.pkl` | 15m | OHLC full-history (2018-2026) | 0.720 | 0.189 | 0.479 | 2.85 |
+| `ml_directional_1h_ohlc_full.pkl` | 1h | OHLC full-history (2018-2026) | 0.700 | 0.198 | 0.440 | 2.60 |
+| `ml_directional_1h_ohlc_2022_2026.pkl` | 1h | OHLC recent-window (2022–2026) | 0.691 | 0.202 | 0.413 | 2.44 |
+| `ml_directional_1h_ohlc_2024_2026.pkl` | 1h | OHLC recent-window (2024–2026) | 0.679 | 0.207 | 0.392 | 2.30 |
+| `ml_directional_4h_ohlc_full.pkl` | 4h | OHLC full-history (2018-2026) | 0.640 | 0.228 | 0.307 | 1.92 |
+| `ml_directional_1d_ohlc_full.pkl` | 1d | OHLC full-history (2018-2026) | 0.513 | 0.312 | 0.027 | 1.12 |
+| `ml_directional_15m_ohlc_overlap.pkl` | 15m | OHLC (Mar–Apr 2026 window) | — | — | — | — |
+| `ml_directional_15m_micro_overlap.pkl` | 15m | OHLC + microstructure (Mar–Apr 2026 window) | 0.596 | 0.258 | 0.195 | 1.48 |
 
 **Current live candidates:** `15m_ohlc_full` (primary) → `1h_ohlc_full` (secondary).  
+Recent-window 1h challengers were trained with the same 1h OHLC feature recipe and walk-forward defaults, but neither beat `1h_ohlc_full` on accuracy, Brier, net EV/trade, or profit factor.  
 Microstructure artifacts are intentionally blocked from live deployment until `micro_*` runtime parity is built.
 
 #### Feature Stack (OHLC-only models)

@@ -68,6 +68,17 @@
    - [x] `1h_full` — second-best candidate
    - [x] `4h_full` — viable research artifact, weaker than 15m/1h
    - [x] `1d_full` — not a current live candidate
+ - [x] Train 1h recent-window challengers with the same baseline 1h OHLC recipe:
+   - [x] `./.venv/bin/python -m scripts.train_ml_directional --target-timeframe 1h --start-date 2022-01-01 --artifact-path data/ml/artifacts/ml_directional_1h_ohlc_2022_2026.pkl`
+   - [x] `./.venv/bin/python -m scripts.train_ml_directional --target-timeframe 1h --start-date 2024-01-01 --artifact-path data/ml/artifacts/ml_directional_1h_ohlc_2024_2026.pkl`
+ - [x] Confirm recent-window challenger artifacts exist:
+   - [x] `data/ml/artifacts/ml_directional_1h_ohlc_2022_2026.pkl`
+   - [x] `data/ml/artifacts/ml_directional_1h_ohlc_2024_2026.pkl`
+ - [x] Compare 1h challengers against the full-history 1h baseline:
+   - [x] `1h_full` — accuracy `0.700`, Brier `0.198`, net EV/trade `0.440`, profit factor `2.60`
+   - [x] `1h_2022_2026` — accuracy `0.691`, Brier `0.202`, net EV/trade `0.413`, profit factor `2.44`
+   - [x] `1h_2024_2026` — accuracy `0.679`, Brier `0.207`, net EV/trade `0.392`, profit factor `2.30`
+ - [x] Keep `1h_full` as the preferred 1h artifact until a later challenger beats it on calibration / EV / robustness
  - [ ] Treat current trainer output as baseline research only:
    - [ ] Calibration is still manual / follow-up work
    - [ ] Final untouched holdout is still follow-up work

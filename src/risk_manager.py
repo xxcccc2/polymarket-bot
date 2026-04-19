@@ -398,6 +398,7 @@ class RiskManager:
         Replace local positions with ground truth from Polymarket Data API.
         Call periodically to fix exposure when fill detection misses trades.
         """
+        old_positions = dict(self.positions)
         old_token_ids = set(self.positions.keys())
         self.positions.clear()
         for p in api_positions:
@@ -415,6 +416,7 @@ class RiskManager:
             market_slug = p.get("slug") or p.get("title") or ""
             outcome = (p.get("outcome") or "Yes").upper()
             side = "YES" if outcome in ("YES", "UP") else "NO"
+            previous = old_positions.get(token_id)
             self.positions[token_id] = Position(
                 token_id=token_id,
                 market_slug=market_slug,
@@ -424,6 +426,18 @@ class RiskManager:
                 current_price=cur_price,
                 unrealized_pnl=(cur_price - avg_price) * size if cur_price > 0 else 0,
             )
+            size_delta = size
+            should_log_inferred_fill = previous is None
+            if previous is not None:
+                size_delta = size - previous.size
+                should_log_inferred_fill = size_delta > 0.01 or side != previous.side
+            if should_log_inferred_fill:
+                size_delta_display = size if previous is None or side != getattr(previous, "side", side) else max(size_delta, 0.0)
+                cprint(
+                    f"📍 Inferred fill from positions sync: {market_slug or token_id} {side} +{size_delta_display:.2f} "
+                    f"-> {size:.2f} @ ${avg_price:.3f} (mark ${cur_price:.3f})",
+                    "cyan",
+                )
             if self.store:
                 try:
                     self._persist_position(self.positions[token_id])
