@@ -11,7 +11,7 @@ Enforces risk limits and circuit breakers:
 import time
 import threading
 from typing import Dict, List, Optional, Callable
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -25,6 +25,8 @@ from .config import (
     MIN_BALANCE_USD,
     MIN_PRICE_CENTS,
     MAX_PRICE_CENTS,
+    ENTRY_ALLOWED_DAYS_UTC,
+    ENTRY_WINDOW_HOURS_UTC,
     ORDER_SIZE_USD,
 )
 from .persistence import SqliteStore
@@ -134,6 +136,9 @@ class RiskManager:
         # Halt trading flag
         self.is_halted = False
         self.halt_reason: Optional[str] = None
+        self.entry_allowed_days_utc = list(ENTRY_ALLOWED_DAYS_UTC)
+        self.entry_window_hours_utc = list(ENTRY_WINDOW_HOURS_UTC)
+        self._entry_gate_reason: Optional[str] = None
         
         # Balance tracking
         self.current_balance: float = 0
@@ -330,6 +335,60 @@ class RiskManager:
             return False, "Drawdown halt active"
         
         return True, "OK"
+
+    def _utc_now(self) -> datetime:
+        return datetime.now(timezone.utc)
+
+    def _hour_allowed_in_entry_window(self, hour_utc: int) -> bool:
+        if not self.entry_window_hours_utc:
+            return True
+        for start_hour, end_hour in self.entry_window_hours_utc:
+            if start_hour < end_hour and start_hour <= hour_utc < end_hour:
+                return True
+            if start_hour > end_hour and (hour_utc >= start_hour or hour_utc < end_hour):
+                return True
+        return False
+
+    def _format_entry_window(self) -> str:
+        if not self.entry_window_hours_utc:
+            return "ALL"
+        return ", ".join(
+            f"{start_hour:02d}:00-{end_hour:02d}:00 UTC"
+            for start_hour, end_hour in self.entry_window_hours_utc
+        )
+
+    def _format_entry_days(self) -> str:
+        if not self.entry_allowed_days_utc:
+            return "ALL"
+        labels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+        return ", ".join(labels[day] for day in sorted(self.entry_allowed_days_utc))
+
+    def _entry_operation_gate_reason(self, now: Optional[datetime] = None) -> Optional[str]:
+        current = now or self._utc_now()
+        if self.entry_allowed_days_utc and current.weekday() not in self.entry_allowed_days_utc:
+            return f"Outside UTC entry days ({self._format_entry_days()})"
+        if not self._hour_allowed_in_entry_window(current.hour):
+            return f"Outside UTC entry window ({self._format_entry_window()})"
+        return None
+
+    def can_open_entry_operation(self) -> tuple[bool, str]:
+        reason = self._entry_operation_gate_reason()
+        self._entry_gate_reason = reason
+        if reason:
+            return False, reason
+        return True, "OK"
+
+    def get_entry_operation_status(self) -> Dict[str, object]:
+        now = self._utc_now()
+        reason = self._entry_operation_gate_reason(now)
+        self._entry_gate_reason = reason
+        return {
+            "days": self._format_entry_days(),
+            "window": self._format_entry_window(),
+            "gate_active": bool(reason),
+            "gate_reason": reason,
+            "current_hour_utc": now.hour,
+        }
     
     def can_open_position(
         self,
@@ -354,6 +413,10 @@ class RiskManager:
         can, reason = self.can_trade()
         if not can:
             return False, reason
+
+        can_open_entry, entry_reason = self.can_open_entry_operation()
+        if not can_open_entry:
+            return False, entry_reason
         
         # Check price range (stink_bid exempt from floor — 1¢ bids are by design)
         price_cents = price * 100
@@ -740,6 +803,7 @@ class RiskManager:
         """Get current risk status."""
         stats = self._get_or_create_daily_stats()
         max_exp = self._get_max_exposure()
+        entry_status = self.get_entry_operation_status()
         
         return {
             "risk_level": self.risk_level.value,
@@ -766,6 +830,10 @@ class RiskManager:
             "dynamic_order_size": self.get_adaptive_order_size(),
             "net_delta": round(self.net_delta, 4),
             "net_gamma": round(self.net_gamma, 4),
+            "entry_days": entry_status.get("days", "ALL"),
+            "entry_window": entry_status.get("window", "ALL"),
+            "entry_gate_active": bool(entry_status.get("gate_active")),
+            "entry_gate_reason": entry_status.get("gate_reason"),
         }
     
     def print_status(self):

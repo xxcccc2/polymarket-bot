@@ -23,7 +23,7 @@ from .logging_utils import cprint, get_session_log_path, set_dashboard_mode
 from .dashboard import (
     Dashboard, DashboardState, BinanceSnapshot,
     StrategyRow, PortfolioSnapshot, ExecutionHealthSnapshot,
-    MarketQualitySnapshot, OpenOrderRow, OpenPositionRow, RecentFillRow, StrategyDetailRow, log as dash_log,
+    MarketQualitySnapshot, OpenOrderRow, OpenPositionRow, RecentFillRow, StrategyDetailRow, MLDecisionRow, log as dash_log,
 )
 from .config import (
     SCAN_INTERVAL_SECONDS,
@@ -368,6 +368,7 @@ class PolymarketBot:
         
         # Track previous throttle to avoid spamming alerts
         self._last_alerted_throttle: float = 1.0
+        self._trade_pause_log: Dict[str, float] = {}
         
         self.multi_strategy_mode = (strategy == "all")
         self.selected_strategy_name = strategy
@@ -766,7 +767,14 @@ class PolymarketBot:
         # Check if trading is allowed
         can_trade, reason = self.risk_manager.can_trade()
         if not can_trade:
-            cprint(f"Trading paused: {reason}", "yellow")
+            now_ts = time.time()
+            throttle_seconds = 300 if any(
+                token in reason.lower() for token in ("entry window", "entry cap")
+            ) else 30
+            last_logged = self._trade_pause_log.get(reason, 0.0)
+            if now_ts - last_logged >= throttle_seconds:
+                self._trade_pause_log[reason] = now_ts
+                cprint(f"Trading paused: {reason}", "yellow")
             self._push_dashboard_state()
             return
         
@@ -955,8 +963,11 @@ class PolymarketBot:
                     import time as _t
                     _rb_log = getattr(self, '_risk_block_log', {})
                     _now = _t.time()
-                    if _now - _rb_log.get(strat_name, 0) >= 30:
-                        _rb_log[strat_name] = _now
+                    throttle_seconds = 300 if any(
+                        token in block_reason.lower() for token in ("entry window", "entry cap")
+                    ) else 30
+                    if _now - _rb_log.get(f"{strat_name}:{block_reason}", 0) >= throttle_seconds:
+                        _rb_log[f"{strat_name}:{block_reason}"] = _now
                         self._risk_block_log = _rb_log
                         cprint(f"[{strat_name}] {n_blocked} blocked: {block_reason}", "yellow")
             else:
@@ -993,6 +1004,7 @@ class PolymarketBot:
         # Strategy rows
         strat_rows = []
         strategy_details: List[StrategyDetailRow] = []
+        ml_decision_rows: List[MLDecisionRow] = []
         eligible_counts = self._priority_strategy_eligibility()
         now_ts = time.time()
         for strat in self.strategies:
@@ -1019,6 +1031,7 @@ class PolymarketBot:
             if strat.name == "ml_directional" and isinstance(horizon_stats, dict):
                 for horizon in ("15m", "1h"):
                     horizon_state = horizon_stats.get(horizon, {}) or {}
+                    decision_snapshot = horizon_state.get("decision_snapshot", {}) or {}
                     horizon_last_ts = ""
                     horizon_last_value = float(horizon_state.get("last_signal_ts", 0) or 0)
                     if horizon_last_value > 0:
@@ -1044,24 +1057,12 @@ class PolymarketBot:
                     sizing_debug = horizon_state.get("sizing_debug", {}) or {}
                     sizing_detail = ""
                     if sizing_debug:
-                        bankroll_val = sizing_debug.get("bankroll")
                         bet_size_val = sizing_debug.get("bet_size_usd")
                         mode_val = sizing_debug.get("mode") or "—"
-                        risk_limit_val = sizing_debug.get("risk_limit_usd")
-                        native_sized = bool(sizing_debug.get("native_sized"))
                         kelly_enabled = sizing_debug.get("kelly_enabled")
-                        bankroll_txt = f"${float(bankroll_val):.2f}" if bankroll_val not in (None, "") else "—"
                         bet_size_txt = f"${float(bet_size_val):.2f}" if bet_size_val not in (None, "") else "—"
-                        risk_limit_txt = (
-                            f"${float(risk_limit_val):.2f}"
-                            if risk_limit_val not in (None, "")
-                            else "—"
-                        )
                         sizing_label = "kelly" if kelly_enabled is not False else "fixed"
-                        sizing_detail = (
-                            f" | {sizing_label} {mode_val} {bet_size_txt} "
-                            f"(bankroll {bankroll_txt}, limit {risk_limit_txt}, native {'Y' if native_sized else 'N'})"
-                        )
+                        sizing_detail = f" | {sizing_label} {mode_val} {bet_size_txt}"
                     strat_rows.append(StrategyRow(
                         name=f"{strat.name}:{horizon}",
                         signals=int(horizon_state.get("signals", 0) or 0),
@@ -1070,6 +1071,11 @@ class PolymarketBot:
                         healthy=healthy,
                         last_signal=horizon_last_ts or "—",
                         status=horizon_state.get("status", "—"),
+                        detail=(
+                            f"model {horizon_state.get('model_version', '—')} | "
+                            f"eligible {eligible_counts.get(f'ml_directional:{horizon}', 0)}"
+                            f"{sizing_detail}"
+                        ),
                     ))
                     strategy_details.append(
                         StrategyDetailRow(
@@ -1085,6 +1091,26 @@ class PolymarketBot:
                             ),
                         )
                     )
+                    inference_ts = float(decision_snapshot.get("last_inference_ts", 0) or 0)
+                    ml_decision_rows.append(
+                        MLDecisionRow(
+                            horizon=horizon,
+                            decision=str(decision_snapshot.get("decision") or "—"),
+                            market=str(decision_snapshot.get("market_slug") or ""),
+                            outcome=str(decision_snapshot.get("outcome") or ""),
+                            probability=float(decision_snapshot.get("probability", 0.0) or 0.0),
+                            threshold_probability=float(decision_snapshot.get("threshold_probability", 0.0) or 0.0),
+                            market_mid_price=float(decision_snapshot.get("market_mid_price", 0.0) or 0.0),
+                            buy_price=float(decision_snapshot.get("buy_price", 0.0) or 0.0),
+                            entry_edge=float(decision_snapshot.get("entry_edge", 0.0) or 0.0),
+                            mid_edge=float(decision_snapshot.get("mid_edge", 0.0) or 0.0),
+                            required_edge=float(decision_snapshot.get("required_edge", 0.0) or 0.0),
+                            block_reason=str(decision_snapshot.get("block_reason") or ""),
+                            status=str(horizon_state.get("status") or "—"),
+                            inference_age_seconds=max(0.0, now_ts - inference_ts) if inference_ts > 0 else 0.0,
+                            model_version=str(horizon_state.get("model_version") or "—"),
+                        )
+                    )
                 continue
 
             strat_rows.append(StrategyRow(
@@ -1095,6 +1121,7 @@ class PolymarketBot:
                 healthy=healthy,
                 last_signal=last_ts,
                 status=state.get('status', ''),
+                detail=self._strategy_summary_text(strat.name, state),
             ))
             strategy_details.append(
                 self._strategy_detail_row(strat.name, state)
@@ -1173,6 +1200,9 @@ class PolymarketBot:
             balance_stale_max_seconds=float(BALANCE_STALE_MAX_SECONDS),
             last_balance_sync_ts=self._last_balance_refresh_success_ts,
             last_positions_sync_ts=self._last_positions_sync_ts,
+            entry_gate_reason=str(rm_status.get('entry_gate_reason') or ''),
+            entry_days=str(rm_status.get('entry_days') or 'ALL'),
+            entry_window=str(rm_status.get('entry_window') or 'ALL'),
         )
 
         now_ts = time.time()
@@ -1247,6 +1277,7 @@ class PolymarketBot:
             open_orders=open_order_rows,
             recent_fills=recent_fill_rows,
             strategy_details=strategy_details,
+            ml_decisions=ml_decision_rows,
             risk_engine=re_snap,
         )
         self.dashboard.update(state)
@@ -1291,6 +1322,25 @@ class PolymarketBot:
                 f"signals {int(state.get('signals_generated', 0) or 0)} | "
                 f"trades {int(state.get('trades_executed', 0) or 0)}"
             ),
+        )
+
+    def _strategy_summary_text(self, name: str, state: Dict) -> str:
+        eligible_counts = self._priority_strategy_eligibility()
+        if name == "terminal_convergence":
+            return (
+                f"edge {float(state.get('best_edge_cents', 0.0) or 0.0):.1f}c | "
+                f"exp {float(state.get('nearest_expiry_s', 0.0) or 0.0):.0f}s | "
+                f"eligible {eligible_counts.get('terminal_convergence', 0)}"
+            )
+        if name == "combinatorial_arb":
+            return (
+                f"valid {int(state.get('valid_parsed', 0) or 0)} | "
+                f"cooldowns {int(state.get('active_cooldowns', 0) or 0)} | "
+                f"eligible {eligible_counts.get('combinatorial_arb', 0)}"
+            )
+        return (
+            f"signals {int(state.get('signals_generated', 0) or 0)} | "
+            f"trades {int(state.get('trades_executed', 0) or 0)}"
         )
 
     def _priority_strategy_eligibility(self) -> Dict[str, int]:

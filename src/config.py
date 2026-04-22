@@ -5,7 +5,7 @@ Polymarket Micro-Spread Trading Bot - Configuration
 import os
 import time
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional, Tuple
 from dotenv import load_dotenv
 
 
@@ -16,6 +16,85 @@ def _getenv_nonempty(name: str, default: str) -> str:
         return default
     value = value.strip()
     return value if value else default
+
+
+def _parse_utc_hour_windows(raw: str) -> tuple[List[Tuple[int, int]], Optional[str]]:
+    text = (raw or "").strip()
+    if not text:
+        return [], None
+
+    windows: List[Tuple[int, int]] = []
+    for chunk in text.split(","):
+        part = chunk.strip()
+        if not part:
+            continue
+        if "-" not in part:
+            return [], f"Invalid UTC hour window '{part}' (expected start-end)"
+        start_raw, end_raw = [item.strip() for item in part.split("-", 1)]
+        try:
+            start = int(start_raw)
+            end = int(end_raw)
+        except ValueError:
+            return [], f"Invalid UTC hour window '{part}' (hours must be integers)"
+        if start < 0 or start > 23:
+            return [], f"Invalid UTC hour window '{part}' (start must be 0-23)"
+        if end < 1 or end > 24:
+            return [], f"Invalid UTC hour window '{part}' (end must be 1-24)"
+        if start == end:
+            return [], f"Invalid UTC hour window '{part}' (window must span at least 1 hour)"
+        windows.append((start, end))
+
+    return windows, None
+
+
+def _parse_utc_allowed_days(raw: str) -> tuple[List[int], Optional[str]]:
+    text = (raw or "").strip()
+    if not text:
+        return [], None
+
+    day_map = {
+        "mon": 0,
+        "monday": 0,
+        "tue": 1,
+        "tues": 1,
+        "tuesday": 1,
+        "wed": 2,
+        "wednesday": 2,
+        "thu": 3,
+        "thur": 3,
+        "thurs": 3,
+        "thursday": 3,
+        "fri": 4,
+        "friday": 4,
+        "sat": 5,
+        "saturday": 5,
+        "sun": 6,
+        "sunday": 6,
+    }
+    days: List[int] = []
+    for chunk in text.split(","):
+        part = chunk.strip().lower()
+        if not part:
+            continue
+        if part not in day_map:
+            return [], f"Invalid UTC day '{part}' (use sun,mon,tue,wed,thu,fri,sat)"
+        day_value = day_map[part]
+        if day_value not in days:
+            days.append(day_value)
+    return days, None
+
+
+def _format_utc_hour_windows(windows: List[Tuple[int, int]]) -> str:
+    if not windows:
+        return "ALL"
+    return ", ".join(f"{start:02d}:00-{end:02d}:00 UTC" for start, end in windows)
+
+
+def _format_utc_allowed_days(days: List[int]) -> str:
+    if not days:
+        return "ALL"
+    labels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    return ", ".join(labels[day] for day in sorted(days))
 
 # Load environment variables in two layers:
 # 1) Optional shared non-secret config file (for collaboration/agents)
@@ -149,6 +228,12 @@ MAX_ACTIVE_ORDERS = int(os.getenv("MAX_ACTIVE_ORDERS", "20"))
 
 # Order timeout - cancel orders older than this (seconds)
 ORDER_TIMEOUT_SECONDS = int(os.getenv("ORDER_TIMEOUT_SECONDS", "300"))
+ENTRY_WINDOW_HOURS_UTC, ENTRY_WINDOW_HOURS_UTC_ERROR = _parse_utc_hour_windows(
+    os.getenv("ENTRY_WINDOW_HOURS_UTC", "")
+)
+ENTRY_ALLOWED_DAYS_UTC, ENTRY_ALLOWED_DAYS_UTC_ERROR = _parse_utc_allowed_days(
+    os.getenv("ENTRY_ALLOWED_DAYS_UTC", "")
+)
 
 # =============================================================================
 # MARKET FILTERS
@@ -558,8 +643,11 @@ ML_COLLECTOR_DEPTH_LEVELS = int(os.getenv("ML_COLLECTOR_DEPTH_LEVELS", "20"))
 ML_COLLECTOR_REST_POLL_SECONDS = int(os.getenv("ML_COLLECTOR_REST_POLL_SECONDS", "60"))
 
 # SQLite database path for persisted bot state
+_state_mode = "paper" if PAPER_TRADING else "live"
 _default_db_name = (
-    f"bot_state_{BOT_WALLET_ID.lower()}.sqlite" if BOT_WALLET_ID else "bot_state.sqlite"
+    f"bot_state_{_state_mode}_{BOT_WALLET_ID.lower()}.sqlite"
+    if BOT_WALLET_ID
+    else f"bot_state_{_state_mode}.sqlite"
 )
 BOT_STATE_DB = Path(os.getenv("BOT_STATE_DB", str(DATA_DIR / _default_db_name)))
 
@@ -619,6 +707,12 @@ def validate_config():
     if ORDER_SIZE_USD < 1:
         errors.append("ORDER_SIZE_USD should be at least $1")
     
+    if ENTRY_WINDOW_HOURS_UTC_ERROR:
+        errors.append(ENTRY_WINDOW_HOURS_UTC_ERROR)
+
+    if ENTRY_ALLOWED_DAYS_UTC_ERROR:
+        errors.append(ENTRY_ALLOWED_DAYS_UTC_ERROR)
+
     return errors
 
 
@@ -652,9 +746,12 @@ def print_config():
     cprint(f"  Min Balance: ${MIN_BALANCE_USD}", "white")
     cprint(f"  Max Active Orders: {MAX_ACTIVE_ORDERS}", "white")
     cprint(f"  Order Timeout: {ORDER_TIMEOUT_SECONDS}s", "white")
-    
+    cprint(f"  Entry Days: {_format_utc_allowed_days(ENTRY_ALLOWED_DAYS_UTC)}", "white")
+    cprint(f"  Entry Window: {_format_utc_hour_windows(ENTRY_WINDOW_HOURS_UTC)}", "white")
+
     cprint("\nBot Settings:", "cyan")
     cprint(f"  Paper Trading: {'ON' if PAPER_TRADING else 'OFF (LIVE)'}", "green" if PAPER_TRADING else "red")
+    cprint(f"  State DB: {BOT_STATE_DB}", "white")
     cprint(f"  Scan Interval: {SCAN_INTERVAL_SECONDS}s", "white")
     cprint(f"  Markets: {'Crypto only' if ONLY_CRYPTO_MARKETS else 'ALL markets (political, sports, crypto)'}", "cyan" if not ONLY_CRYPTO_MARKETS else "white")
     cprint(f"  Log Level: {LOG_LEVEL}", "white")

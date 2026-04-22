@@ -82,6 +82,7 @@ class StrategyRow:
     healthy: bool = True
     last_signal: str = ""  # human-readable time or "—"
     status: str = ""  # e.g. "0 in window", "2 groups" — visible in TUI
+    detail: str = ""
 
 
 @dataclass
@@ -106,6 +107,9 @@ class PortfolioSnapshot:
     balance_stale_max_seconds: float = 240.0
     last_balance_sync_ts: float = 0.0
     last_positions_sync_ts: float = 0.0
+    entry_gate_reason: str = ""
+    entry_days: str = "ALL"
+    entry_window: str = "ALL"
 
 
 @dataclass
@@ -174,6 +178,25 @@ class StrategyDetailRow:
 
 
 @dataclass
+class MLDecisionRow:
+    horizon: str = ""
+    decision: str = ""
+    market: str = ""
+    outcome: str = ""
+    probability: float = 0.0
+    threshold_probability: float = 0.0
+    market_mid_price: float = 0.0
+    buy_price: float = 0.0
+    entry_edge: float = 0.0
+    mid_edge: float = 0.0
+    required_edge: float = 0.0
+    block_reason: str = ""
+    status: str = ""
+    inference_age_seconds: float = 0.0
+    model_version: str = ""
+
+
+@dataclass
 class RiskEngineSnapshot:
     native_available: bool = False
     engine_label: str = "PYTHON"
@@ -202,6 +225,7 @@ class DashboardState:
     open_orders: List[OpenOrderRow] = field(default_factory=list)
     recent_fills: List[RecentFillRow] = field(default_factory=list)
     strategy_details: List[StrategyDetailRow] = field(default_factory=list)
+    ml_decisions: List[MLDecisionRow] = field(default_factory=list)
     risk_engine: RiskEngineSnapshot = field(default_factory=RiskEngineSnapshot)
 
 
@@ -258,7 +282,7 @@ class Dashboard:
             self._render_header(s),
             self._render_summary(s),
             self._render_strategies(s.strategies),
-            self._render_strategy_details(s.strategy_details),
+            self._render_ml_decisions(s.ml_decisions),
             self._render_open_positions(s.open_positions),
             Columns(
                 [self._render_open_orders(s.open_orders), self._render_recent_fills(s.recent_fills)],
@@ -359,6 +383,14 @@ class Dashboard:
         if p.throttle < 1.0:
             lines.append(f"[yellow]Throttle: {p.throttle*100:.0f}%[/]")
 
+        if p.entry_gate_reason:
+            lines.append(f"[yellow]{p.entry_gate_reason}[/]")
+        else:
+            if p.entry_days != "ALL":
+                lines.append(f"[dim]UTC entry days: {p.entry_days}[/]")
+            if p.entry_window != "ALL":
+                lines.append(f"[dim]UTC entry window: {p.entry_window}[/]")
+
         # Balance staleness warning
         if p.balance_stale_block_buys and p.last_balance_sync_ts > 0:
             age = p.balance_age_seconds
@@ -434,8 +466,8 @@ class Dashboard:
         table.add_column("Sig", justify="right", ratio=1)
         table.add_column("Trades", justify="right", ratio=1)
         table.add_column("Last", justify="left", ratio=1)
-        table.add_column("Health", justify="center", ratio=1)
-        table.add_column("Status", justify="left", ratio=4)
+        table.add_column("Status", justify="left", ratio=3)
+        table.add_column("Summary", justify="left", ratio=5)
 
         for r in rows:
             table.add_row(
@@ -443,8 +475,8 @@ class Dashboard:
                 str(r.signals),
                 str(r.trades),
                 r.last_signal or "—",
-                "[green]OK[/]" if r.healthy else "[red]WARN[/]",
                 r.status or "—",
+                r.detail or "—",
             )
 
         return Panel(table, title="Strategies", border_style="cyan", box=box.ROUNDED)
@@ -532,6 +564,72 @@ class Dashboard:
         for row in rows:
             table.add_row(row.name or "—", row.summary or "—", row.detail or "—")
         return Panel(table, title="Strategy Detail", border_style="bright_cyan", box=box.ROUNDED)
+
+    @staticmethod
+    def _render_ml_decisions(rows: List[MLDecisionRow]) -> Panel:
+        def _delta_style(value: float) -> str:
+            if value >= 0.01:
+                return "green"
+            if value >= 0.0:
+                return "yellow"
+            if value > -0.01:
+                return "bright_red"
+            return "red"
+
+        def _age_style(value: float) -> str:
+            if value <= 5:
+                return "green"
+            if value <= 20:
+                return "yellow"
+            return "red"
+
+        table = Table(box=box.SIMPLE_HEAVY, expand=True, show_edge=False, padding=(0, 1))
+        table.add_column("Horizon", ratio=1)
+        table.add_column("Decision", ratio=1)
+        table.add_column("Prob vs Thresh", justify="left", ratio=2)
+        table.add_column("Edge vs Need", justify="left", ratio=2)
+        table.add_column("Pricing", justify="left", ratio=2)
+        table.add_column("Age", justify="right", ratio=1)
+        table.add_column("Candidate / Reason", ratio=6)
+        if not rows:
+            table.add_row("—", "—", "—", "—", "—", "—", "ML directional not loaded")
+        for row in rows:
+            decision_style = "green" if row.decision == "BUY" else "yellow"
+            prob_gap = row.probability - row.threshold_probability
+            edge_gap = row.entry_edge - row.required_edge
+            prob_style = _delta_style(prob_gap)
+            edge_style = _delta_style(edge_gap)
+            age_style = _age_style(row.inference_age_seconds)
+            candidate = row.market or "—"
+            if row.outcome:
+                candidate = f"{candidate} [{row.outcome}]"
+            tail = row.block_reason or row.status or "—"
+            model_txt = row.model_version or "—"
+            table.add_row(
+                row.horizon or "—",
+                f"[{decision_style}]{row.decision or '—'}[/]",
+                (
+                    f"{row.probability*100:.1f}c / {row.threshold_probability*100:.1f}c\n"
+                    f"[{prob_style}]{prob_gap*100:+.1f}c[/]"
+                )
+                if row.threshold_probability > 0
+                else "—",
+                (
+                    f"{row.entry_edge*100:.1f}c / {row.required_edge*100:.1f}c\n"
+                    f"[{edge_style}]{edge_gap*100:+.1f}c[/]"
+                )
+                if row.required_edge > 0
+                else "—",
+                (
+                    f"mid {row.market_mid_price:.3f}  buy {row.buy_price:.3f}\n"
+                    f"mid-edge {row.mid_edge*100:+.1f}c"
+                )
+                if row.market_mid_price > 0 or row.buy_price > 0
+                else "—",
+                f"[{age_style}]{Dashboard._fmt_age(row.inference_age_seconds)}[/]",
+                f"{candidate}\nmodel {model_txt} | {tail}",
+            )
+        return Panel(table, title="ML Live Decision", border_style="bright_yellow", box=box.ROUNDED)
 
     @staticmethod
     def _fmt_age(seconds: float, na: bool = False) -> str:

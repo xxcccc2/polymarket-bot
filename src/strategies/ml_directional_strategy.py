@@ -141,6 +141,10 @@ class MLDirectionalStrategy(BaseStrategy):
         self._horizon_trade_counts: Dict[str, int] = {"15m": 0, "1h": 0}
         self._horizon_last_signal_ts: Dict[str, float] = {"15m": 0.0, "1h": 0.0}
         self._horizon_status: Dict[str, str] = {"15m": "idle", "1h": "idle"}
+        self._last_decision_snapshot_by_horizon: Dict[str, Dict[str, Any]] = {
+            "15m": {},
+            "1h": {},
+        }
         self._last_sizing_debug: Dict[str, Dict[str, float | str | bool | None]] = {
             "15m": {},
             "1h": {},
@@ -185,6 +189,7 @@ class MLDirectionalStrategy(BaseStrategy):
         block_reason = "idle"
         horizon_blocks: Dict[str, str] = {horizon: "idle" for horizon in ("15m", "1h")}
         horizon_signal_counts: Dict[str, int] = {horizon: 0 for horizon in ("15m", "1h")}
+        decision_candidates: Dict[str, Dict[str, Any]] = {horizon: {} for horizon in ("15m", "1h")}
 
         if not self.enabled:
             self._last_scan_status = "disabled"
@@ -242,19 +247,40 @@ class MLDirectionalStrategy(BaseStrategy):
             threshold = max(self.min_edge, self._compute_threshold(buy_price))
             mid_edge = outcome_probability - data.mid_price
             edge = outcome_probability - buy_price
+            decision_snapshot: Dict[str, Any] = {
+                "market_slug": data.market_slug,
+                "outcome": data.outcome,
+                "probability": round(outcome_probability, 6),
+                "threshold_probability": round(model_threshold, 6),
+                "market_mid_price": round(float(data.mid_price), 6),
+                "buy_price": round(float(buy_price), 6),
+                "entry_edge": round(edge, 6),
+                "mid_edge": round(mid_edge, 6),
+                "required_edge": round(threshold, 6),
+                "model_version": model_version,
+                "last_inference_ts": self._last_inference_ts,
+                "decision": "BLOCKED",
+                "block_reason": "",
+            }
             if outcome_probability < model_threshold:
                 block_reason = f"prob {outcome_probability*100:.1f}c < {model_threshold*100:.1f}c"
                 horizon_blocks[horizon] = block_reason
+                decision_snapshot["block_reason"] = block_reason
+                self._update_decision_candidate(decision_candidates, horizon, decision_snapshot)
                 continue
             if edge <= threshold:
                 block_reason = f"edge {edge*100:.1f}c < {threshold*100:.1f}c"
                 horizon_blocks[horizon] = block_reason
+                decision_snapshot["block_reason"] = block_reason
+                self._update_decision_candidate(decision_candidates, horizon, decision_snapshot)
                 continue
 
             bet_size_usd = self._size_bet(outcome_probability, buy_price, data.token_id, horizon=horizon)
             if bet_size_usd <= 0:
                 block_reason = self._zero_size_block_reason(horizon)
                 horizon_blocks[horizon] = block_reason
+                decision_snapshot["block_reason"] = block_reason
+                self._update_decision_candidate(decision_candidates, horizon, decision_snapshot)
                 continue
             cancel_block_reason = self._recent_cancel_block_reason(
                 condition_id=data.condition_id,
@@ -266,12 +292,19 @@ class MLDirectionalStrategy(BaseStrategy):
             if cancel_block_reason:
                 block_reason = cancel_block_reason
                 horizon_blocks[horizon] = block_reason
+                decision_snapshot["block_reason"] = block_reason
+                self._update_decision_candidate(decision_candidates, horizon, decision_snapshot)
                 continue
             shares = round(max(0.0, bet_size_usd / buy_price), 2)
             if shares <= 0:
                 block_reason = "shares <= 0"
                 horizon_blocks[horizon] = block_reason
+                decision_snapshot["block_reason"] = block_reason
+                self._update_decision_candidate(decision_candidates, horizon, decision_snapshot)
                 continue
+
+            decision_snapshot["decision"] = "BUY"
+            self._update_decision_candidate(decision_candidates, horizon, decision_snapshot)
 
             signal = Signal(
                 signal_type=SignalType.BUY,
@@ -327,7 +360,28 @@ class MLDirectionalStrategy(BaseStrategy):
                 self._horizon_status[horizon] = f"{horizon_signal_counts[horizon]} live signals"
             else:
                 self._horizon_status[horizon] = horizon_blocks.get(horizon) or "idle"
+            self._last_decision_snapshot_by_horizon[horizon] = decision_candidates.get(horizon, {})
         return signals
+
+    def _update_decision_candidate(
+        self,
+        candidates: Dict[str, Dict[str, Any]],
+        horizon: str,
+        snapshot: Dict[str, Any],
+    ) -> None:
+        existing = candidates.get(horizon) or {}
+        if not existing:
+            candidates[horizon] = snapshot
+            return
+        existing_edge = float(existing.get("entry_edge", -999.0) or -999.0)
+        snapshot_edge = float(snapshot.get("entry_edge", -999.0) or -999.0)
+        existing_buy = existing.get("decision") == "BUY"
+        snapshot_buy = snapshot.get("decision") == "BUY"
+        if snapshot_buy and not existing_buy:
+            candidates[horizon] = snapshot
+            return
+        if snapshot_buy == existing_buy and snapshot_edge > existing_edge:
+            candidates[horizon] = snapshot
 
     def execute(self, signals: List[Signal], order_manager) -> List[Dict]:
         results = []
@@ -601,6 +655,7 @@ class MLDirectionalStrategy(BaseStrategy):
                         "resolved_brier_samples": len(self._resolved_brier),
                         "halt_reason": self._halt_reason,
                         "sizing_debug": self._last_sizing_debug.get(horizon, {}),
+                        "decision_snapshot": self._last_decision_snapshot_by_horizon.get(horizon, {}),
                     }
                     for horizon in sorted(self.enabled_horizons or {"15m", "1h"})
                 },
