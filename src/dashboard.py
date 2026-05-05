@@ -282,6 +282,7 @@ class Dashboard:
             self._render_header(s),
             self._render_summary(s),
             self._render_strategies(s.strategies),
+            self._render_strategy_details(s.strategy_details),
             self._render_ml_decisions(s.ml_decisions),
             self._render_open_positions(s.open_positions),
             Columns(

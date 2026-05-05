@@ -1396,7 +1396,7 @@ class PolymarketBot:
                 # Gamma API includes bestBid/bestAsk directly in market data!
                 best_bid = float(market.get("bestBid", 0) or 0)
                 best_ask = float(market.get("bestAsk", 1) or 1)
-                has_real_quotes = best_bid > 0 and best_ask > 0 and best_ask < 1
+                market_has_real_quotes = best_bid > 0 and best_ask > 0 and best_ask < 1
                 accepting_orders = bool(market.get("acceptingOrders", True))
                 fees_enabled = bool(market.get("feesEnabled", True))
                 fee_rate_bps = market.get("feeRateBps")
@@ -1427,11 +1427,11 @@ class PolymarketBot:
                     and any(kw in mtext for kw in BTC_5MIN_KEYWORDS)
                 )
                 
-                if not has_real_quotes and not is_crypto_st and not any(
+                if not market_has_real_quotes and not is_crypto_st and not any(
                     kw in mtext for kw in ["above", "below", "over", "under", "exceed", "reach"]
                 ):
                     continue
-                if not has_real_quotes:
+                if not market_has_real_quotes:
                     best_bid = 0.0
                     best_ask = 0.0
                 
@@ -1484,10 +1484,11 @@ class PolymarketBot:
                     
                     # For the first token, use API bid/ask directly
                     # For the second token, invert (complement pricing)
+                    token_has_real_quotes = market_has_real_quotes
                     if idx == 0:
                         t_bid, t_ask = best_bid, best_ask
                     else:
-                        if has_real_quotes:
+                        if market_has_real_quotes:
                             t_bid = round(max(0.01, 1.0 - best_ask), 4)
                             t_ask = round(min(0.99, 1.0 - best_bid), 4)
                         else:
@@ -1515,11 +1516,11 @@ class PolymarketBot:
                             t_ask = float(ws_ob.best_ask) if ws_ob.asks else t_ask
                             t_mid = (t_bid + t_ask) / 2
                             t_spread = t_ask - t_bid
-                            has_real_quotes = bool(ws_ob.bids or ws_ob.asks)
+                            token_has_real_quotes = bool(ws_ob.bids or ws_ob.asks)
 
-                    data_source_quality = "live_quotes" if has_real_quotes else "missing_quotes"
+                    data_source_quality = "live_quotes" if token_has_real_quotes else "missing_quotes"
                     quality_stats["total_tokens"] += 1
-                    if has_real_quotes:
+                    if token_has_real_quotes:
                         quality_stats["real_quote_tokens"] += 1
                     else:
                         quality_stats["missing_quote_tokens"] += 1
@@ -1569,14 +1570,14 @@ class PolymarketBot:
                         end_date_ts=end_ts,
                         event_title=str(market.get("event_title") or ""),
                         event_slug=str(market.get("event_slug") or ""),
-                        has_real_quotes=has_real_quotes,
+                        has_real_quotes=token_has_real_quotes,
                         accepting_orders=accepting_orders,
                         fees_enabled=fees_enabled,
                         fee_rate_bps=fee_rate_bps,
                         is_resolved=is_resolved,
                         resolution_outcome=str(resolution_outcome).upper() if resolution_outcome not in (None, "") else None,
                         data_source_quality=data_source_quality,
-                        quote_source="websocket" if ob_data else ("gamma" if has_real_quotes else "missing"),
+                        quote_source="websocket" if ob_data else ("gamma" if token_has_real_quotes else "missing"),
                         tick_size=tick_size,
                     )
                     
@@ -2808,8 +2809,17 @@ class PolymarketBot:
                     size_matched = 0.0
                 if size_matched > 0:
                     order.filled_size = max(order.filled_size, size_matched)
-                    order.status = OrderStatus.FILLED if order.filled_size >= order.size else OrderStatus.PARTIAL
+                    # Order-channel size_matched is cumulative and may arrive before the
+                    # trade event with the executable fill details. Keep the order active
+                    # so the trade channel or REST sync can still drive risk/PnL updates.
+                    order.status = OrderStatus.PARTIAL
                     order.updated_at = datetime.now()
+                    if order.metadata is None:
+                        order.metadata = {}
+                    order.metadata["user_ws_size_matched"] = max(
+                        float((order.metadata or {}).get("user_ws_size_matched", 0.0) or 0.0),
+                        size_matched,
+                    )
                     self.order_manager._persist_order(order)
             if raw_status in {"CANCELED", "CANCELLED"} or raw_type in {"CANCELLATION", "CANCEL"}:
                 submitted_expiration = (order.metadata or {}).get("submitted_expiration") if order.metadata else None

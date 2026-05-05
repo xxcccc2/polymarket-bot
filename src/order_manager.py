@@ -233,6 +233,13 @@ class OrderManager:
     def on_cancel(self, callback: Callable[[Order, str], None]):
         """Register callback for order cancellations."""
         self._cancel_callbacks.append(callback)
+
+    def _notify_cancel(self, order: Order, reason: str) -> None:
+        for callback in self._cancel_callbacks:
+            try:
+                callback(order, reason)
+            except Exception as e:
+                cprint(f"❌ Cancel callback error: {e}", "red")
     
     def place_limit_order(
         self,
@@ -516,12 +523,7 @@ class OrderManager:
             order.metadata["cancel_reason"] = reason
             self.total_orders_cancelled += 1
             
-            # Notify callbacks
-            for callback in self._cancel_callbacks:
-                try:
-                    callback(order, reason)
-                except Exception as e:
-                    cprint(f"❌ Cancel callback error: {e}", "red")
+            self._notify_cancel(order, reason)
             
             cprint(f"🚫 Cancelled: {order} - {reason}", "yellow")
             self._persist_order(order)
@@ -542,13 +544,8 @@ class OrderManager:
         order.metadata["cancel_reason"] = reason
         self.total_orders_cancelled += 1
         self._persist_order(order)
-        for callback in self._cancel_callbacks:
-            try:
-                callback(order, reason)
-            except Exception as e:
-                cprint(f"❌ Cancel callback error: {e}", "red")
+        self._notify_cancel(order, reason)
         cprint(f"🚫 Cancelled: {order} - {reason}", "yellow")
-        self._persist_order(order)
         return {"success": True}
     
     def cancel_all_orders(self, reason: str = "Cancel all requested") -> int:
@@ -609,10 +606,37 @@ class OrderManager:
             cprint(f"⚠️ Fill for unknown order: {order_id}", "yellow")
             return
 
+        try:
+            fill_size = float(fill_data.get("size", 0) or 0)
+        except (TypeError, ValueError):
+            fill_size = 0.0
+        try:
+            fill_price = float(fill_data.get("price", order.price) or order.price)
+        except (TypeError, ValueError):
+            fill_price = order.price
+        metadata = order.metadata if isinstance(order.metadata, dict) else {}
+        try:
+            provisional_matched = float(metadata.get("user_ws_size_matched", 0.0) or 0.0)
+            provisional_consumed = float(metadata.get("user_ws_size_matched_consumed", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            provisional_matched = 0.0
+            provisional_consumed = 0.0
+        provisional_available = max(0.0, provisional_matched - provisional_consumed)
+        if provisional_available > 0 and fill_size > 0:
+            provisional_reversal = min(fill_size, provisional_available)
+            order.filled_size = max(0.0, order.filled_size - provisional_reversal)
+            metadata["user_ws_size_matched_consumed"] = provisional_consumed + provisional_reversal
+            order.metadata = metadata
+        remaining_before = max(order.remaining_size, 0.0)
+        if remaining_before <= 0:
+            return
+        if fill_size <= 0:
+            return
+        fill_size = min(fill_size, remaining_before)
+        fill_data = dict(fill_data)
+        fill_data["size"] = fill_size
+        fill_data["price"] = fill_price
         self.total_fill_events += 1
-
-        fill_size = float(fill_data.get("size", 0))
-        fill_price = float(fill_data.get("price", order.price))
         
         order.filled_size += fill_size
         order.updated_at = datetime.now()
@@ -758,13 +782,8 @@ class OrderManager:
                         })
                         cprint(f"🔄 Synced FILL (heuristic): {order}", "green")
                     else:
-                        # No matching trade → likely cancelled by exchange
-                        order.status = OrderStatus.CANCELLED
-                        self.total_orders_cancelled += 1
-                        cprint(f"🔄 Synced CANCEL: {order} (removed from exchange)", "yellow")
-                    
-                    order.updated_at = datetime.now()
-                    self._persist_order(order)
+                        # No matching trade → likely cancelled by exchange.
+                        self.mark_order_cancelled(order_id, "Exchange sync: removed from open orders")
             
         except Exception as e:
             cprint(f"❌ Sync error: {e}", "red")

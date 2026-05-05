@@ -42,6 +42,25 @@ def test_market_feed_parses_best_bid_ask_and_resolution_events():
     assert feed.tick_size_by_token["token-1"] == 0.01
 
 
+def test_market_feed_sorts_orderbook_levels_before_best_prices():
+    feed = WebSocketFeed()
+    feed._on_message(
+        None,
+        json.dumps(
+            {
+                "event_type": "book",
+                "asset_id": "token-1",
+                "bids": [{"price": "0.41", "size": "5"}, {"price": "0.44", "size": "2"}],
+                "asks": [{"price": "0.49", "size": "5"}, {"price": "0.46", "size": "2"}],
+            }
+        ),
+    )
+
+    book = feed.orderbooks["token-1"]
+    assert book.best_bid == 0.44
+    assert book.best_ask == 0.46
+
+
 def test_user_feed_subscription_includes_markets():
     feed = UserWebSocketFeed(lambda: {"apiKey": "k"}, lambda: ["cond-1", "cond-2"])
     feed.ws = DummyWS()

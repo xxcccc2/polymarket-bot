@@ -3,7 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from src.bot import PolymarketBot
-from src.order_manager import Order, OrderStatus
+from src.order_manager import Order, OrderManager, OrderStatus
 
 
 def test_user_trade_update_ignores_non_terminal_status():
@@ -124,3 +124,65 @@ def test_user_order_update_marks_partial_fill_without_waiting_for_trade_confirma
     assert order.status == OrderStatus.PARTIAL
     assert order.filled_size == 4
     assert persisted[-1] == ("order-1", "partial", 4.0)
+
+
+def test_user_order_update_keeps_full_match_active_until_trade_confirmation():
+    bot = PolymarketBot.__new__(PolymarketBot)
+    persisted = []
+    order = Order(
+        order_id="order-1",
+        token_id="token-1",
+        market_slug="btc-market",
+        side="BUY",
+        price=0.5,
+        size=10,
+        status=OrderStatus.OPEN,
+        metadata={"strategy": "ml_directional"},
+    )
+    bot.order_manager = SimpleNamespace(
+        get_order=lambda oid: order,
+        _persist_order=lambda o: persisted.append((o.order_id, o.status.value, o.filled_size)),
+        mark_order_cancelled=lambda order_id, reason: None,
+    )
+
+    bot._on_user_order_update(
+        SimpleNamespace(
+            order_id="order-1",
+            status="LIVE",
+            raw={"type": "UPDATE", "status": "LIVE", "size_matched": "10"},
+        )
+    )
+
+    assert order.status == OrderStatus.PARTIAL
+    assert order.is_active
+    assert order.metadata["user_ws_size_matched"] == 10.0
+
+
+def test_trade_confirmation_after_user_order_match_does_not_overfill():
+    bot = PolymarketBot.__new__(PolymarketBot)
+    manager = OrderManager(SimpleNamespace())
+    order = Order(
+        order_id="order-1",
+        token_id="token-1",
+        market_slug="btc-market",
+        side="BUY",
+        price=0.5,
+        size=10,
+        filled_size=10,
+        status=OrderStatus.PARTIAL,
+        metadata={"strategy": "ml_directional", "user_ws_size_matched": 10.0},
+    )
+    manager.orders[order.order_id] = order
+    manager.orders_by_token[order.token_id] = [order.order_id]
+    bot.order_manager = manager
+    bot._refresh_balance = lambda: None
+    bot.telegram = SimpleNamespace(alert_fill=lambda **kwargs: None)
+
+    bot._handle_fill_event(
+        order,
+        {"trade_id": "trade-1", "side": "BUY", "price": 0.5, "size": 10, "token_id": "token-1"},
+    )
+
+    assert order.status == OrderStatus.FILLED
+    assert order.filled_size == 10
+    assert order.metadata["user_ws_size_matched_consumed"] == 10.0

@@ -311,18 +311,22 @@ class WebSocketFeed:
                 bids = [{"price": data.get("best_bid"), "size": data.get("best_bid_size", 0)}]
             if not asks and data.get("best_ask") is not None:
                 asks = [{"price": data.get("best_ask"), "size": data.get("best_ask_size", 0)}]
+            parsed_bids = [
+                {"price": _to_float(level.get("price")), "size": _to_float(level.get("size"))}
+                for level in bids
+                if isinstance(level, dict)
+            ]
+            parsed_asks = [
+                {"price": _to_float(level.get("price")), "size": _to_float(level.get("size"))}
+                for level in asks
+                if isinstance(level, dict)
+            ]
+            parsed_bids.sort(key=lambda level: level["price"], reverse=True)
+            parsed_asks.sort(key=lambda level: level["price"])
             update = OrderbookUpdate(
                 token_id=token_id,
-                bids=[
-                    {"price": _to_float(level.get("price")), "size": _to_float(level.get("size"))}
-                    for level in bids
-                    if isinstance(level, dict)
-                ],
-                asks=[
-                    {"price": _to_float(level.get("price")), "size": _to_float(level.get("size"))}
-                    for level in asks
-                    if isinstance(level, dict)
-                ],
+                bids=parsed_bids,
+                asks=parsed_asks,
                 timestamp=datetime.now()
             )
             

@@ -1,4 +1,5 @@
 from src.bot import (
+    PolymarketBot,
     _extract_asset_from_bucket,
     _extract_horizon_from_bucket,
     _market_text_payload,
@@ -6,6 +7,10 @@ from src.bot import (
     _parse_market_end_ts,
     _shortterm_bucket_key,
 )
+from src.websocket_feed import OrderbookUpdate
+
+from datetime import datetime, timezone
+from types import SimpleNamespace
 
 
 def test_shortterm_bucket_key_detects_btc_15m_from_event_slug_and_title():
@@ -102,3 +107,42 @@ def test_normalize_market_outcome_label_preserves_non_shortterm_markets():
     }
 
     assert _normalize_market_outcome_label(market, "Yes", 0) == "Yes"
+
+
+def test_build_market_data_keeps_quote_quality_per_token():
+    bot = PolymarketBot.__new__(PolymarketBot)
+    bot._recent_trades_cache = []
+    bot.markets = {
+        "cond-1": {
+            "conditionId": "cond-1",
+            "question": "Bitcoin Up or Down - 15 Minutes",
+            "slug": "btc-updown-15m-1776093300",
+            "clobTokenIds": ["token-up", "token-down"],
+            "outcomes": ["Up", "Down"],
+            "bestBid": 0,
+            "bestAsk": 0,
+            "acceptingOrders": True,
+        }
+    }
+    bot.feed = SimpleNamespace(
+        resolved_markets={},
+        tick_size_by_token={},
+        get_latest_orderbook=lambda token_id: (
+            OrderbookUpdate(
+                token_id="token-up",
+                bids=[{"price": 0.51, "size": 10}],
+                asks=[{"price": 0.53, "size": 10}],
+                timestamp=datetime.now(timezone.utc),
+            )
+            if token_id == "token-up"
+            else None
+        ),
+    )
+
+    rows = bot._build_market_data()
+    by_token = {row.token_id: row for row in rows}
+
+    assert by_token["token-up"].has_real_quotes is True
+    assert by_token["token-up"].data_source_quality == "live_quotes"
+    assert by_token["token-down"].has_real_quotes is False
+    assert by_token["token-down"].data_source_quality == "missing_quotes"

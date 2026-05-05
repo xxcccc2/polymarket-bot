@@ -449,6 +449,7 @@ class MLDirectionalStrategy(BaseStrategy):
                             "predicted_prob": signal.metadata.get("predicted_prob"),
                             "edge": signal.metadata.get("edge"),
                             "price": placed_price,
+                            "horizon": horizon,
                             "end_date_ts": signal.metadata.get("end_date_ts"),
                             "side": signal.side,
                             "market_slug": signal.market_slug,
