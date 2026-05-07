@@ -385,6 +385,12 @@ class PolymarketClient:
         Returns:
             True if connected successfully
         """
+        if PAPER_TRADING:
+            self.is_connected = True
+            self.api_creds_set = False
+            cprint("Paper trading enabled: skipping authenticated CLOB connection", "yellow")
+            return True
+
         if not CLOB_AVAILABLE:
             cprint("Cannot connect: py-clob-client-v2 not installed", "red")
             return False
@@ -1096,6 +1102,8 @@ class PolymarketClient:
         and dedupes. This ensures we never miss taker fills when we take liquidity.
         """
         if not self.is_connected:
+            return []
+        if PAPER_TRADING:
             return []
         effective_timeout = timeout_s if (timeout_s and timeout_s > 0) else TRADE_FETCH_TIMEOUT_SECONDS
         clob_trades: List[Dict] = []

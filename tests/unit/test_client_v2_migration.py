@@ -115,6 +115,27 @@ def test_connect_rebuilds_client_with_v2_api_creds(monkeypatch):
     assert DummyClobClient.constructed[1]["creds"].api_key == "key"
 
 
+def test_connect_skips_clob_auth_in_paper_mode(monkeypatch):
+    patch_client(monkeypatch)
+    monkeypatch.setattr(client_module, "PAPER_TRADING", True)
+    client = PolymarketClient()
+
+    assert client.connect() is True
+
+    assert client.is_connected is True
+    assert client.api_creds_set is False
+    assert DummyClobClient.constructed == []
+
+
+def test_get_trades_skips_live_client_in_paper_mode(monkeypatch):
+    patch_client(monkeypatch)
+    monkeypatch.setattr(client_module, "PAPER_TRADING", True)
+    client = PolymarketClient()
+    assert client.connect() is True
+
+    assert client.get_trades() == []
+
+
 def test_place_order_uses_v2_order_args_without_fee_rate_bps(monkeypatch):
     patch_client(monkeypatch)
     client = PolymarketClient()
