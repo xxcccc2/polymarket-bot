@@ -159,31 +159,25 @@ def get_portfolio_value(user: str) -> Optional[float]:
     return None
 
 
-# USDC.e (bridged) on Polygon - used by Polymarket
+# V2 spendable collateral is pUSD. USDC.e is kept as informational pre-wrap cash.
+_PUSD_POLYGON = "0xAdA100Db00Ca00073811820692005400218FcE1f"
 _USDC_POLYGON = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
 _POLYGON_RPC = "https://polygon-bor-rpc.publicnode.com"
 
 
-def get_usdc_balance_on_chain(address: str) -> Optional[float]:
-    """
-    Read USDC balance from Polygon for a wallet (proxy address).
-    Returns balance in USD (6 decimals). Use when Data API /value is too low
-    (it returns position value only, not free USDC).
-    """
+def get_erc20_balance_on_chain(address: str, token_address: str) -> Optional[float]:
     if not address or not address.startswith("0x") or len(address) != 42:
         return None
     try:
         import requests
-        # balanceOf(address) selector
         selector = "0x70a08231"
-        # Pad address to 32 bytes (lowercase, no 0x for the param)
         addr = address.lower().replace("0x", "").zfill(64)
         data_hex = selector + addr
         payload = {
             "jsonrpc": "2.0",
             "method": "eth_call",
             "params": [
-                {"to": _USDC_POLYGON, "data": data_hex},
+                {"to": token_address, "data": data_hex},
                 "latest",
             ],
             "id": 1,
@@ -195,36 +189,51 @@ def get_usdc_balance_on_chain(address: str) -> Optional[float]:
         result = j.get("result")
         if not result or result == "0x":
             return 0.0
-        return int(result, 16) / 1_000_000  # USDC has 6 decimals
+        return int(result, 16) / 1_000_000
     except Exception:
         return None
 
 
+def get_pusd_balance_on_chain(address: str) -> Optional[float]:
+    return get_erc20_balance_on_chain(address, _PUSD_POLYGON)
+
+
+def get_usdc_balance_on_chain(address: str) -> Optional[float]:
+    return get_erc20_balance_on_chain(address, _USDC_POLYGON)
+
+
 def get_balance_total(user: str) -> Optional[float]:
     """
-    Get best estimate of total account value (free USDC + positions).
-    - On-chain USDC = proxy wallet balance (source of truth for available cash)
+    Get best estimate of total account value (free pUSD + positions).
+    - On-chain pUSD = V2 spendable trading collateral
+    - On-chain USDC.e = pre-wrap cash, informational only
     - Data API /value = position value only (market exposure, NOT free USDC)
-    When /value shows $0.02 but real balance is $77+, we use on-chain USDC.
     Fetches both in parallel to reduce latency.
     """
     if not user or not user.startswith("0x"):
         return None
     import concurrent.futures
-    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
-        f_on_chain = ex.submit(get_usdc_balance_on_chain, user)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as ex:
+        f_pusd = ex.submit(get_pusd_balance_on_chain, user)
+        f_usdc = ex.submit(get_usdc_balance_on_chain, user)
         f_position = ex.submit(get_portfolio_value, user)
         try:
-            on_chain = f_on_chain.result(timeout=10)
+            pusd = f_pusd.result(timeout=10)
         except concurrent.futures.TimeoutError:
-            on_chain = None
+            pusd = None
+        try:
+            usdc = f_usdc.result(timeout=10)
+        except concurrent.futures.TimeoutError:
+            usdc = None
         try:
             position_val = f_position.result(timeout=10)
         except concurrent.futures.TimeoutError:
             position_val = None
-    # Prefer on-chain when substantial (fixes /value showing $0.02 when balance is $77+)
-    if on_chain is not None and on_chain >= 1.0:
+    if pusd is not None and pusd >= 1.0:
         pv = position_val if position_val is not None and position_val > 0 else 0
-        return on_chain + pv
+        return pusd + pv
+    if usdc is not None and usdc >= 1.0:
+        pv = position_val if position_val is not None and position_val > 0 else 0
+        return pv
     # Fallback: /value when on-chain fails, returns 0, or RPC unavailable
     return position_val

@@ -1,7 +1,7 @@
 """
 Polymarket CLOB Client Wrapper
 
-Wraps the official py-clob-client with additional error handling,
+Wraps the official py-clob-client-v2 with additional error handling,
 rate limiting, and convenience methods.
 """
 
@@ -61,29 +61,47 @@ from .config import (
     CLOB_HEARTBEAT_INTERVAL_SECONDS,
     TRADE_FETCH_TIMEOUT_SECONDS,
     BALANCE_FETCH_TIMEOUT_SECONDS,
+    POLYMARKET_BUILDER_CODE,
 )
 from .data_client import get_balance_total, get_trades_by_user, get_positions
 
-# Will be imported when py-clob-client is installed
+# Will be imported when py-clob-client-v2 is installed
 try:
-    from py_clob_client.client import ClobClient
-    from py_clob_client.clob_types import (
+    from py_clob_client_v2 import (
+        ApiCreds,
+        ClobClient,
         OrderArgs,
         OrderType,
         PostOrdersArgs,
+        PostOrdersV2Args,
         PartialCreateOrderOptions,
         BalanceAllowanceParams,
         AssetType,
         TradeParams,
+        Side,
+        OrderPayload,
     )
-    from py_clob_client.order_builder.constants import BUY, SELL
-    from py_clob_client.headers.headers import create_level_2_headers
-    from py_clob_client.http_helpers.helpers import post as clob_post
-    from py_clob_client.clob_types import RequestArgs
+    try:
+        from py_clob_client_v2 import BuilderConfig
+    except ImportError:
+        BuilderConfig = None
     CLOB_AVAILABLE = True
 except ImportError:
+    ApiCreds = None
+    ClobClient = None
+    OrderArgs = None
+    OrderType = None
+    PostOrdersArgs = None
+    PostOrdersV2Args = None
+    PartialCreateOrderOptions = None
+    BalanceAllowanceParams = None
+    AssetType = None
+    TradeParams = None
+    Side = None
+    OrderPayload = None
+    BuilderConfig = None
     CLOB_AVAILABLE = False
-    cprint("⚠️  py-clob-client not installed. Run: pip install py-clob-client", "yellow")
+    cprint("⚠️  py-clob-client-v2 not installed. Run: pip install py-clob-client-v2", "yellow")
 
 
 class PolymarketClient:
@@ -110,6 +128,7 @@ class PolymarketClient:
         self._heartbeat_warned_unavailable = False
         self._heartbeat_id: str = ""
         self._market_meta_cache: Dict[str, Tuple[str, bool]] = {}
+        self._api_creds = None
         
         # Track rate limits
         self.min_order_interval = 1.0 / ORDER_RATE_LIMIT_SUSTAINED
@@ -182,7 +201,12 @@ class PolymarketClient:
             return False
         try:
             cprint(f"Refreshing API credentials ({reason})...", "yellow")
-            self.client.set_api_creds(self.client.create_or_derive_api_creds())
+            creds = self.client.create_or_derive_api_key()
+            self._api_creds = creds
+            if hasattr(self.client, "set_api_creds"):
+                self.client.set_api_creds(creds)
+            else:
+                self.client = self._build_clob_client(creds=creds)
             self.api_creds_set = True
             return True
         except Exception as exc:
@@ -252,14 +276,10 @@ class PolymarketClient:
                     body["heartbeat_id"] = self._heartbeat_id
                 serialized = json.dumps(body, separators=(",", ":"), ensure_ascii=False)
                 try:
-                    request_args = RequestArgs(
-                        method="POST",
-                        request_path=path,
-                        body=body,
-                        serialized_body=serialized,
-                    )
-                    headers = create_level_2_headers(self.client.signer, self.client.creds, request_args)
-                    response = clob_post(f"{self.client.host}{path}", headers=headers, data=serialized)
+                    if not hasattr(self.client, "_l2_headers") or not hasattr(self.client, "_post"):
+                        raise Exception("heartbeat endpoint unavailable")
+                    headers = self.client._l2_headers("POST", path, body=body, serialized_body=serialized)
+                    response = self.client._post(f"{self.client.host}{path}", headers=headers, data=serialized)
                     next_heartbeat_id = self._extract_heartbeat_id(response)
                     if next_heartbeat_id:
                         self._heartbeat_id = next_heartbeat_id
@@ -276,6 +296,23 @@ class PolymarketClient:
             cprint("WARNING: Heartbeat endpoint unavailable on current API/SDK combination", "yellow")
             self._heartbeat_warned_unavailable = True
         raise Exception("; ".join(errors) if errors else "heartbeat endpoint unavailable")
+
+    def _build_clob_client(self, creds: Optional["ApiCreds"] = None):
+        builder_config = None
+        if BuilderConfig is not None and POLYMARKET_BUILDER_CODE:
+            try:
+                builder_config = BuilderConfig(builder_code=POLYMARKET_BUILDER_CODE)
+            except TypeError:
+                builder_config = None
+        return ClobClient(
+            host=CLOB_HOST,
+            chain_id=CHAIN_ID,
+            key=PRIVATE_KEY,
+            creds=creds,
+            signature_type=SIGNATURE_TYPE,
+            funder=PROXY_ADDRESS,
+            builder_config=builder_config,
+        )
 
     def _refresh_allowance(self, force: bool = False, reason: str = "periodic") -> bool:
         """
@@ -349,7 +386,7 @@ class PolymarketClient:
             True if connected successfully
         """
         if not CLOB_AVAILABLE:
-            cprint("Cannot connect: py-clob-client not installed", "red")
+            cprint("Cannot connect: py-clob-client-v2 not installed", "red")
             return False
         
         if not PRIVATE_KEY or not PROXY_ADDRESS:
@@ -358,22 +395,15 @@ class PolymarketClient:
         
         try:
             cprint("Connecting to Polymarket CLOB...", "cyan")
-            
-            self.client = ClobClient(
-                host=CLOB_HOST,
-                key=PRIVATE_KEY,
-                chain_id=CHAIN_ID,
-                signature_type=SIGNATURE_TYPE,
-                funder=PROXY_ADDRESS
-            )
-            
-            # Derive API credentials
             cprint("Setting up API credentials...", "cyan")
-            self.client.set_api_creds(self.client.create_or_derive_api_creds())
+            auth_client = self._build_clob_client()
+            creds = auth_client.create_or_derive_api_key()
+            self._api_creds = creds
+            self.client = self._build_clob_client(creds=creds)
             self.api_creds_set = True
-            self._refresh_allowance(force=True, reason="startup")
             
             self.is_connected = True
+            self._refresh_allowance(force=True, reason="startup")
             self._start_heartbeat_loop()
             cprint("Connected to Polymarket CLOB", "green")
             
@@ -441,6 +471,32 @@ class PolymarketClient:
             self._market_meta_cache.pop(token_id, None)
             return
         self._market_meta_cache.clear()
+
+    @staticmethod
+    def _side_value(side: str):
+        return Side.BUY if side.upper() == "BUY" else Side.SELL
+
+    def _make_order_args(
+        self,
+        token_id: str,
+        side: str,
+        price: float,
+        size: float,
+        expiration: Optional[int] = None,
+    ):
+        kwargs = {
+            "price": price,
+            "size": size,
+            "side": self._side_value(side),
+            "token_id": token_id,
+        }
+        if expiration:
+            kwargs["expiration"] = int(expiration)
+        try:
+            return OrderArgs(**kwargs)
+        except TypeError:
+            kwargs.pop("expiration", None)
+            return OrderArgs(**kwargs)
     
     def _rate_limit(self):
         """Enforce rate limiting between orders."""
@@ -802,29 +858,19 @@ class PolymarketClient:
             # Rate limiting
             self._rate_limit()
             
-            # Build order args
-            order_args = OrderArgs(
-                price=price,
-                size=size,
-                side=BUY if side.upper() == "BUY" else SELL,
-                token_id=token_id,
-                expiration=int(expiration or 0),
-                fee_rate_bps=int(fee_rate_bps or 0),
-            )
+            order_args = self._make_order_args(token_id, side, price, size, expiration)
             
             create_options = self._get_order_create_options(token_id)
 
-            # Create and sign order
-            signed_order = self._retry_call(
-                lambda: self.client.create_order(order_args, create_options),
-                "Create order",
-            )
-
-            # Post order
             ot = getattr(OrderType, order_type.upper(), OrderType.GTC)
             result = self._retry_call(
-                lambda: self.client.post_order(signed_order, ot, post_only=post_only),
-                "Post order",
+                lambda: self.client.create_and_post_order(
+                    order_args=order_args,
+                    options=create_options,
+                    order_type=ot,
+                    post_only=post_only,
+                ),
+                "Create and post order",
             )
             
             cprint(f"Order placed: {side} {size:.2f} @ ${price:.3f}", "green")
@@ -845,23 +891,17 @@ class PolymarketClient:
                     self._log_allowance_diagnostics("order-error:after-refresh", throttle_seconds=0)
                     try:
                         self._rate_limit()
-                        order_args = OrderArgs(
-                            price=price,
-                            size=size,
-                            side=BUY if side.upper() == "BUY" else SELL,
-                            token_id=token_id,
-                            expiration=int(expiration or 0),
-                            fee_rate_bps=int(fee_rate_bps or 0),
-                        )
+                        order_args = self._make_order_args(token_id, side, price, size, expiration)
                         create_options = self._get_order_create_options(token_id)
-                        signed_order = self._retry_call(
-                            lambda: self.client.create_order(order_args, create_options),
-                            "Create order",
-                        )
                         ot = getattr(OrderType, order_type.upper(), OrderType.GTC)
                         result = self._retry_call(
-                            lambda: self.client.post_order(signed_order, ot, post_only=post_only),
-                            "Post order",
+                            lambda: self.client.create_and_post_order(
+                                order_args=order_args,
+                                options=create_options,
+                                order_type=ot,
+                                post_only=post_only,
+                            ),
+                            "Create and post order",
                         )
                         cprint(f"Order placed after allowance refresh: {side} {size:.2f} @ ${price:.3f}", "green")
                         return {
@@ -918,11 +958,12 @@ class PolymarketClient:
             for order in orders:
                 side = (order.get("side") or "").upper()
                 token_id = order["token_id"]
-                order_args = OrderArgs(
+                order_args = self._make_order_args(
+                    token_id=token_id,
+                    side=side,
                     price=float(order["price"]),
                     size=float(order["size"]),
-                    side=BUY if side == "BUY" else SELL,
-                    token_id=token_id,
+                    expiration=order.get("expiration"),
                 )
                 create_options = self._get_order_create_options(token_id)
                 signed_order = self._retry_call(
@@ -930,7 +971,8 @@ class PolymarketClient:
                     "Create batch order",
                 )
                 ot = getattr(OrderType, str(order.get("order_type", "GTC")).upper(), OrderType.GTC)
-                batch_args.append(PostOrdersArgs(order=signed_order, orderType=ot))
+                post_orders_cls = PostOrdersV2Args or PostOrdersArgs
+                batch_args.append(post_orders_cls(order=signed_order, orderType=ot))
 
             posted = self._retry_call(
                 lambda: self.client.post_orders(batch_args),
@@ -994,7 +1036,13 @@ class PolymarketClient:
         
         try:
             self._rate_limit()
-            result = self._retry_call(lambda: self.client.cancel(order_id), f"Cancel order {order_id}")
+            if hasattr(self.client, "cancel_order"):
+                result = self._retry_call(
+                    lambda: self.client.cancel_order(OrderPayload(orderID=order_id)),
+                    f"Cancel order {order_id}",
+                )
+            else:
+                result = self._retry_call(lambda: self.client.cancel(order_id), f"Cancel order {order_id}")
             
             cprint(f"🚫 Order cancelled: {order_id}", "yellow")
             return {"success": True, "result": result}
@@ -1025,14 +1073,16 @@ class PolymarketClient:
             return []
         
         try:
-            orders = self._retry_call(lambda: self.client.get_orders(), "Fetch open orders")
+            fetch_open_orders = getattr(self.client, "get_open_orders", None) or getattr(self.client, "get_orders")
+            orders = self._retry_call(lambda: fetch_open_orders(), "Fetch open orders")
             return orders if orders else []
             
         except Exception as e:
             error_msg = self._format_error(e)
             if self._is_auth_error(error_msg) and self._refresh_api_creds(reason="get_open_orders"):
                 try:
-                    orders = self._retry_call(lambda: self.client.get_orders(), "Fetch open orders")
+                    fetch_open_orders = getattr(self.client, "get_open_orders", None) or getattr(self.client, "get_orders")
+                    orders = self._retry_call(lambda: fetch_open_orders(), "Fetch open orders")
                     return orders if orders else []
                 except Exception as retry_exc:
                     error_msg = self._format_error(retry_exc)

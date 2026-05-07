@@ -2,7 +2,7 @@
 # Core dependencies
 
 # Polymarket CLOB client
-py-clob-client>=0.34.6
+py-clob-client-v2
 
 # WebSocket for real-time data
 websocket-client>=1.9.0

@@ -194,6 +194,7 @@ else:
 
 # Signature types (per Polymarket docs):
 # 0 = EOA, 1 = POLY_PROXY (email/magic), 2 = GNOSIS_SAFE
+POLYMARKET_BUILDER_CODE = os.getenv("POLYMARKET_BUILDER_CODE", "").strip()
 
 # =============================================================================
 # TRADING PARAMETERS

@@ -252,7 +252,6 @@ class OrderManager:
         metadata: Optional[Dict] = None,
         expiration: Optional[int] = None,
         post_only: bool = False,
-        fee_rate_bps: Optional[int] = None,
     ) -> Dict:
         """
         Place a limit order with validation.
@@ -301,7 +300,6 @@ class OrderManager:
         if "outcome_side" not in metadata:
             metadata["outcome_side"] = metadata.get("side")
         metadata.setdefault("post_only", bool(post_only))
-        metadata.setdefault("fee_rate_bps", fee_rate_bps)
         metadata.setdefault("expiration", expiration)
         metadata.setdefault("order_type", order_type)
 
@@ -315,7 +313,6 @@ class OrderManager:
                 order_type=order_type,
                 expiration=expiration,
                 post_only=post_only,
-                fee_rate_bps=fee_rate_bps,
             )
         except TypeError:
             # Backward-compatible path for mocks/older client signatures.
