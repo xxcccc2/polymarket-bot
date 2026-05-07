@@ -87,7 +87,7 @@ Traders use the Kelly Criterion to maximize the long-term growth of their bankro
 
 ##### Developer Tools and SDKs
 
-* **py-clob-client**  **:**  Official Polymarket Python client for CLOB API access.  
+* **py-clob-client-v2**  **:**  Official Polymarket Python client (v2) for CLOB API access (this codebase uses v2 via `requirements.txt`; v1 `py-clob-client` is not supported).  
 * **predmarket**  **SDK:**  A unified Python SDK for both Kalshi and Polymarket APIs.  
 * **Bitquery API:**  Provides GraphQL access to blockchain-level data for Polymarket, including OrderFilled and TokenRegistered events.  
 * **Gamma API:**  Polymarket's endpoint for market discovery and metadata.

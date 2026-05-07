@@ -42,6 +42,8 @@ source venv/bin/activate  # macOS/Linux
 pip install -r requirements.txt
 ```
 
+`requirements.txt` pins **[py-clob-client-v2](https://pypi.org/project/py-clob-client-v2/)** for Polymarket’s CLOB API. The older `py-clob-client` (v1) package is not used. Behavior (auth flow, `PartialCreateOrderOptions`, batch `PostOrdersV2Args`, `OrderPayload` cancels) is summarized in **[docs/clob-v2-sdk.md](docs/clob-v2-sdk.md)**.
+
 ### 2. Build the Native Math Engine (Optional but Recommended)
 
 ```bash
@@ -422,8 +424,8 @@ See [docs/backtesting/](docs/backtesting/) for full documentation.
   - This usually means low **spendable collateral**, not low total portfolio value.
   - Enable `ALLOWANCE_DIAGNOSTICS_ENABLED=true` to log allowance snapshots.
 - **`AttributeError ... tick_size` during live order placement**:
-  - The client now builds typed `PartialCreateOrderOptions` for the current `py-clob-client`.
-  - If this returns after an SDK upgrade, re-check the installed `create_order()` signature before trading live.
+  - The client builds typed `PartialCreateOrderOptions` (`tick_size`, `neg_risk`) for **py-clob-client-v2**.
+  - After upgrading the SDK, confirm `create_and_post_order` / `PartialCreateOrderOptions` still match upstream; see [docs/clob-v2-sdk.md](docs/clob-v2-sdk.md).
 - **Repeated 401 on fill checks**:
   - Credential refresh is automatic, but network/latency can still slow loops.
   - Tune `TRADE_FETCH_TIMEOUT_SECONDS` and `BALANCE_FETCH_TIMEOUT_SECONDS`.
@@ -496,7 +498,7 @@ When enabled, all risk limits scale dynamically with your balance:
 - Stale order auto-cleanup after timeout
 - Graceful shutdown cancels all active orders
 - Exchange sync distinguishes fills from cancels
-- Per-order metadata persists `post_only`, `fee_rate_bps`, and expiration so fill accounting stays aligned with live execution
+- Per-order metadata persists `post_only`, `fee_rate_bps`, and expiration for reconciliation; **v2 `OrderArgs` does not take `fee_rate_bps`** (the live client omits it when talking to the SDK—see [docs/clob-v2-sdk.md](docs/clob-v2-sdk.md))
 
 ### TUI Dashboard
 
@@ -536,7 +538,7 @@ polymarket-bot/
 │   └── libpmkernel.dylib         # macOS — or .so on Linux
 ├── src/
 │   ├── bot.py                    # Main orchestrator
-│   ├── client.py                 # Polymarket CLOB client
+│   ├── client.py                 # Polymarket CLOB client (py-clob-client-v2)
 │   ├── config.py                 # All configuration (incl. bs-p params)
 │   ├── order_manager.py          # Order lifecycle
 │   ├── risk_manager.py           # Adaptive risk + portfolio Greeks + shock testing
@@ -676,6 +678,7 @@ python -m src.bot --strategy my_strategy
 
 - [Polymarket CLOB API](https://docs.polymarket.com/quickstart/orders/first-order)
 - [Polymarket WebSocket](https://docs.polymarket.com/developers/CLOB/websocket)
+- [CLOB SDK v2 notes in this repo](docs/clob-v2-sdk.md)
 - [Binance WebSocket](https://developers.binance.com/docs/binance-spot-api-docs/web-socket-streams)
 - [Telegram Bot API](https://core.telegram.org/bots/api)
 - [bs-p native engine](docs/engines/bs-p/deployment-guide.md) — Avellaneda-Stoikov quoting, Kelly sizing, portfolio Greeks

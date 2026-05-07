@@ -71,6 +71,8 @@ Would require:
 **Gamma API:** `gamma-api.polymarket.com`  
 **CLOB API:** `clob.polymarket.com`
 
+This repository’s live path uses **py-clob-client-v2** with that CLOB host by default; see [CLOB SDK v2 notes](../clob-v2-sdk.md) for auth and order APIs.
+
 ### Limitations for Backtesting
 
 - **No historical orderbook** — Only current snapshot
