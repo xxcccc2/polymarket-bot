@@ -310,7 +310,7 @@ class SpreadStrategy(BaseStrategy):
                 is_crypto = any(kw in data.question.lower() for kw in CRYPTO_MARKET_KEYWORDS)
                 if not is_crypto and self.only_crypto:
                     pass
-                elif mid_cents < MIN_PRICE_CENTS or mid_cents > MAX_PRICE_CENTS:
+                elif verbose and (mid_cents < MIN_PRICE_CENTS or mid_cents > MAX_PRICE_CENTS):
                     cprint(f"      {data.question[:35]}... filtered: price {mid_cents:.1f}¢ out of range", "yellow")
                 elif data.spread_cents < self.min_spread_cents:
                     pass

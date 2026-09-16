@@ -25,6 +25,7 @@ DATABASES = {
     "ml": ROOT / "data" / "ml_15m_paper.sqlite",
     "spread": ROOT / "data" / "spread_15m_paper.sqlite",
 }
+LOGS = {"ml": ROOT / "logs" / "ml-15m.log", "spread": ROOT / "logs" / "spread-15m.log"}
 
 
 def systemctl(action: str, unit: str) -> str:
@@ -52,12 +53,18 @@ def stats(name: str) -> tuple[int, int, int, float]:
 
 
 def scanned_markets(name: str) -> int:
-    output = subprocess.run(
-        ["journalctl", "-u", UNITS[name], "-n", "200", "--no-pager", "-o", "cat"],
-        text=True, capture_output=True, check=False,
-    ).stdout
+    output = read_log(name, 100_000)
     matches = re.findall(r"(?:Found|Refreshed) (\d+) tradeable markets", output)
     return int(matches[-1]) if matches else 0
+
+
+def read_log(name: str, limit: int = 3_000) -> str:
+    try:
+        with LOGS[name].open("rb") as file:
+            file.seek(max(0, file.seek(0, 2) - limit))
+            return file.read().decode(errors="replace")
+    except OSError:
+        return "Логов пока нет"
 
 
 def experiment_text(name: str, title: str) -> str:
@@ -166,10 +173,7 @@ async def main() -> None:
         if not permitted(call):
             return
         name = call.data.split(":", 1)[1]
-        output = subprocess.run(
-            ["journalctl", "-u", UNITS[name], "-n", "25", "--no-pager", "-o", "cat"],
-            text=True, capture_output=True, check=False,
-        ).stdout[-3000:] or "Логов пока нет"
+        output = read_log(name)
         await edit(call, f"📜 {name}\n<pre>{html.escape(output)}</pre>")
 
     await dp.start_polling(Bot(TOKEN))

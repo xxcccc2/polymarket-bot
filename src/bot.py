@@ -681,6 +681,7 @@ class PolymarketBot:
         last_balance_check = 0
         last_market_refresh = 0
         last_sync = 0
+        last_heartbeat = 0
         fill_check_interval = 30 if (ENABLE_USER_WEBSOCKET_FEED and not PAPER_TRADING) else 10
         sync_interval = POSITIONS_SYNC_SECONDS  # Sync order state + positions (catches missed fills, fixes drifted exposure)
         self._recent_trades_cache: List[Dict] = []  # shared with VPIN
@@ -689,6 +690,15 @@ class PolymarketBot:
         while self.is_running:
             try:
                 now = time.time()
+
+                if now - last_heartbeat >= 60:
+                    binance_state = "connected" if self.binance_feed and self.binance_feed.connected else "disconnected"
+                    order_count = len(self.order_manager.orders) if self.order_manager else 0
+                    cprint(
+                        f"heartbeat | markets={len(self.markets)} | binance={binance_state} | orders={order_count}",
+                        "cyan",
+                    )
+                    last_heartbeat = now
                 
                 # Check if it's time to scan
                 if now - last_scan >= SCAN_INTERVAL_SECONDS:
