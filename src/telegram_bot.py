@@ -4,6 +4,8 @@ from __future__ import annotations
 import asyncio
 import html
 import os
+import re
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -18,6 +20,10 @@ load_dotenv(ROOT / ".env")
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 UNITS = {"ml": "polymarket-ml.service", "spread": "polymarket-spread.service"}
+DATABASES = {
+    "ml": ROOT / "data" / "ml_15m_paper.sqlite",
+    "spread": ROOT / "data" / "spread_15m_paper.sqlite",
+}
 
 
 def systemctl(action: str, unit: str) -> str:
@@ -30,11 +36,44 @@ def active(name: str) -> bool:
     return systemctl("is-active", UNITS[name]) == "active"
 
 
+def stats(name: str) -> tuple[int, int, int, float]:
+    try:
+        with sqlite3.connect(DATABASES[name]) as db:
+            orders = db.execute("SELECT COUNT(*) FROM orders").fetchone()[0]
+            trades = db.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
+            positions = db.execute("SELECT COUNT(*) FROM positions").fetchone()[0]
+            pnl = db.execute(
+                "SELECT COALESCE(SUM(realized_pnl), 0) + COALESCE(SUM(unrealized_pnl), 0) FROM positions"
+            ).fetchone()[0]
+        return orders, trades, positions, float(pnl or 0)
+    except (OSError, sqlite3.Error):
+        return 0, 0, 0, 0.0
+
+
+def scanned_markets(name: str) -> int:
+    output = subprocess.run(
+        ["journalctl", "-u", UNITS[name], "-n", "200", "--no-pager", "-o", "cat"],
+        text=True, capture_output=True, check=False,
+    ).stdout
+    matches = re.findall(r"(?:Found|Refreshed) (\d+) tradeable markets", output)
+    return int(matches[-1]) if matches else 0
+
+
+def experiment_text(name: str, title: str) -> str:
+    orders, trades, positions, pnl = stats(name)
+    return (
+        f"{title}: {'🟢' if active(name) else '⚪'}\n"
+        f"Банк: $100.00 · PnL: ${pnl:+.2f}\n"
+        f"Ордера: {orders} · Сделки: {trades} · Позиции: {positions}\n"
+        f"Обзор рынков: {scanned_markets(name)}"
+    )
+
+
 def status_text(prefix: str = "") -> str:
     return (
         f"{prefix}📊 BTC 15m PAPER\n\n"
-        f"🧠 ML directional: {'🟢' if active('ml') else '⚪'}\n"
-        f"📈 A-S spread: {'🟢' if active('spread') else '⚪'}\n"
+        f"{experiment_text('ml', '🧠 ML maker')}\n\n"
+        f"{experiment_text('spread', '📈 A-S maker')}\n\n"
         "BTC 5m: 🔴 выключен\nLive: 🔒 выключен"
     )
 

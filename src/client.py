@@ -690,6 +690,9 @@ class PolymarketClient:
             current_offset = offset
 
             while True:
+                # Gamma currently rejects offsets above 2000 with 422.
+                if current_offset > 2000:
+                    break
                 params = {
                     "closed": "false",
                     "active": "true",

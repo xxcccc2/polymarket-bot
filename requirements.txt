@@ -21,6 +21,7 @@ requests>=2.31.0
 
 # Async support (future upgrade)
 aiohttp>=3.9.0
+aiogram>=3.13.0
 
 # Logging
 loguru>=0.7.0
