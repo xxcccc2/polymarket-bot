@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 
 from aiogram import Bot, Dispatcher, F
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import CommandStart
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from dotenv import load_dotenv
@@ -61,11 +62,15 @@ def scanned_markets(name: str) -> int:
 
 def experiment_text(name: str, title: str) -> str:
     orders, trades, positions, pnl = stats(name)
+    markets = scanned_markets(name)
+    state = "⚪ выключен"
+    if active(name):
+        state = "🟢 paper-фарм" if orders or trades or positions else ("🟡 сканирует" if markets else "🟡 ждёт рынок")
     return (
-        f"{title}: {'🟢' if active(name) else '⚪'}\n"
+        f"{title}: {state}\n"
         f"Банк: $100.00 · PnL: ${pnl:+.2f}\n"
         f"Ордера: {orders} · Сделки: {trades} · Позиции: {positions}\n"
-        f"Обзор рынков: {scanned_markets(name)}"
+        f"Обзор рынков: {markets}"
     )
 
 
@@ -93,8 +98,12 @@ def permitted(event: Message | CallbackQuery) -> bool:
 
 
 async def edit(call: CallbackQuery, text: str) -> None:
-    await call.message.edit_text(text, reply_markup=menu(), parse_mode="HTML")
     await call.answer()
+    try:
+        await call.message.edit_text(text, reply_markup=menu(), parse_mode="HTML")
+    except TelegramBadRequest as exc:
+        if "message is not modified" not in str(exc):
+            raise
 
 
 async def run_daily() -> None:
