@@ -1785,8 +1785,8 @@ class PolymarketBot:
                                     limit=event_limit,
                                     max_pages=1,
                                     offset=page_idx * event_limit,
-                                    order="endDate",
-                                    ascending=True,
+                                    order="startDate",
+                                    ascending=False,
                                 )
                                 if not batch:
                                     break
@@ -1832,8 +1832,8 @@ class PolymarketBot:
                                 limit=event_limit,
                                 max_pages=1,
                                 offset=page_idx * event_limit,
-                                order="endDate",
-                                ascending=True,
+                                order="startDate",
+                                ascending=False,
                             )
                             if not batch:
                                 break

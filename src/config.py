@@ -253,6 +253,16 @@ ONLY_CRYPTO_MARKETS = os.getenv("ONLY_CRYPTO_MARKETS", "false").lower() == "true
 SPREAD_ONLY_CRYPTO_MARKETS = os.getenv("SPREAD_ONLY_CRYPTO_MARKETS", "false").lower() == "true"
 # When true: only trade crypto short-term (5m/15m/1h/4h up/down), exclude MegaETH/long-dated
 SPREAD_ONLY_SHORTTERM_CRYPTO = os.getenv("SPREAD_ONLY_SHORTTERM_CRYPTO", "false").lower() == "true"
+SPREAD_ALLOWED_HORIZONS = [
+    value.strip().lower()
+    for value in os.getenv("SPREAD_ALLOWED_HORIZONS", "").split(",")
+    if value.strip()
+]
+SPREAD_ALLOWED_ASSETS = [
+    value.strip().lower()
+    for value in os.getenv("SPREAD_ALLOWED_ASSETS", "").split(",")
+    if value.strip()
+]
 # Spread log: false = one summary line per scan (TUI-friendly); true = per-signal detail
 SPREAD_LOG_VERBOSE = os.getenv("SPREAD_LOG_VERBOSE", "false").lower() == "true"
 
@@ -696,10 +706,10 @@ def validate_config():
     """Validate required configuration is present"""
     errors = []
     
-    if not PRIVATE_KEY:
+    if not PAPER_TRADING and not PRIVATE_KEY:
         errors.append("POLYMARKET_PRIVATE_KEY not set in .env")
     
-    if not PROXY_ADDRESS:
+    if not PAPER_TRADING and not PROXY_ADDRESS:
         errors.append("POLYMARKET_PROXY_ADDRESS not set in .env")
     
     if MIN_SPREAD_CENTS < 0.1:

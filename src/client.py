@@ -704,7 +704,13 @@ class PolymarketClient:
                     response.raise_for_status()
                     return response.json()
 
-                result = self._retry_call(_request, f"Fetch events offset={current_offset}")
+                try:
+                    result = self._retry_call(_request, f"Fetch events offset={current_offset}")
+                except requests.HTTPError as exc:
+                    # Gamma caps deep offsets with 422. Keep the valid pages already fetched.
+                    if current_offset > 0 and exc.response is not None and exc.response.status_code == 422:
+                        break
+                    raise
                 if not isinstance(result, list) or not result:
                     break
 

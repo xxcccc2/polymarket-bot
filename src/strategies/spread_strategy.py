@@ -37,6 +37,8 @@ from ..config import (
     CRYPTO_MARKET_KEYWORDS,
     SPREAD_ONLY_CRYPTO_MARKETS,
     SPREAD_ONLY_SHORTTERM_CRYPTO,
+    SPREAD_ALLOWED_HORIZONS,
+    SPREAD_ALLOWED_ASSETS,
     SPREAD_LOG_VERBOSE,
     VOL_HIGH_THRESHOLD,
     VOL_LOW_THRESHOLD,
@@ -132,11 +134,33 @@ class SpreadStrategy(BaseStrategy):
             is_crypto = any(kw in text for kw in CRYPTO_MARKET_KEYWORDS)
             if not is_crypto:
                 return False
+            if SPREAD_ALLOWED_ASSETS and not any(
+                marker in text
+                for asset in SPREAD_ALLOWED_ASSETS
+                for marker in {
+                    "btc": ("bitcoin", "btc"),
+                    "eth": ("ethereum", "eth"),
+                    "sol": ("solana", "sol"),
+                    "xrp": ("xrp",),
+                }.get(asset, ())
+            ):
+                return False
             # When only_shortterm_crypto: exclude MegaETH, airdrop, etc. — only 5m/15m/1h/4h up/down
             if self.only_shortterm_crypto:
                 is_shortterm = any(kw in text for kw in shortterm_duration_markers)
                 if not is_shortterm:
                     return False
+            if SPREAD_ALLOWED_HORIZONS and not any(
+                marker in text
+                for horizon in SPREAD_ALLOWED_HORIZONS
+                for marker in {
+                    "5m": ("5m", "5 min", "5-min", "5-minute", "updown-5m"),
+                    "15m": ("15m", "15 min", "15-min", "15-minute", "updown-15m"),
+                    "1h": ("1h", "1 hour", "updown-1h"),
+                    "4h": ("4h", "4 hour", "4-hour", "updown-4h"),
+                }.get(horizon, ())
+            ):
+                return False
         
         # Check price is in safe range
         mid_cents = market_data.mid_price * 100

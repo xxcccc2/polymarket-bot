@@ -1,0 +1,14 @@
+[Unit]
+Description=Polymarket Telegram control bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=/opt/polymarket-bot
+EnvironmentFile=/opt/polymarket-bot/.env
+ExecCondition=/bin/sh -c "/bin/grep -Eq '^TELEGRAM_BOT_TOKEN=[0-9]+:[A-Za-z0-9_-]+[[:space:]]*$' /opt/polymarket-bot/.env && /bin/grep -Eq '^TELEGRAM_CHAT_ID=-?[0-9]+[[:space:]]*$' /opt/polymarket-bot/.env"
+ExecStart=/opt/polymarket-bot/venv/bin/python -m src.telegram_bot
+Restart=no
+
+[Install]
+WantedBy=multi-user.target

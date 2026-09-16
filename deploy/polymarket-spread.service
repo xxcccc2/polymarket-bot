@@ -1,0 +1,15 @@
+[Unit]
+Description=Polymarket Avellaneda-Stoikov 15m paper experiment
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=/opt/polymarket-bot
+EnvironmentFile=/opt/polymarket-bot/.env
+EnvironmentFile=/opt/polymarket-bot/config/spread-15m-paper.env
+ExecStart=/opt/polymarket-bot/venv/bin/python -m src.bot --strategy spread --paper
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
