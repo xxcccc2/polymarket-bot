@@ -681,7 +681,6 @@ class PolymarketClient:
         """
         if not self.is_connected:
             return []
-        
         try:
             import requests
             
@@ -731,6 +730,23 @@ class PolymarketClient:
         except Exception as e:
             cprint(f"Failed to fetch events: {e}", "yellow")
             return []
+
+    def get_event_by_slug(self, slug: str) -> Optional[Dict]:
+        """Fetch one Gamma event directly, avoiding deep offset pagination."""
+        if not self.is_connected:
+            return None
+        try:
+            import requests
+
+            response = requests.get(
+                f"{GAMMA_HOST}/events", params={"slug": slug}, timeout=15
+            )
+            response.raise_for_status()
+            result = response.json()
+            return result[0] if isinstance(result, list) and result else None
+        except Exception as exc:
+            cprint(f"Failed to fetch event slug {slug}: {exc}", "yellow")
+            return None
 
     def get_market(self, condition_id: str) -> Optional[Dict]:
         """

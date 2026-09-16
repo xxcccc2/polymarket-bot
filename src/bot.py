@@ -374,7 +374,9 @@ class PolymarketBot:
         self.selected_strategy_name = strategy
         self.strategies: List[BaseStrategy] = []
         self.ml_directional_lean_mode = bool(
-            ML_DIRECTIONAL_LEAN_MODE and not self.multi_strategy_mode and strategy in {"ml_directional", "terminal_convergence"}
+            ML_DIRECTIONAL_LEAN_MODE
+            and not self.multi_strategy_mode
+            and strategy in {"ml_directional", "terminal_convergence", "spread"}
         )
         self.ml_directional_lean_assets = set(ML_DIRECTIONAL_LEAN_ASSETS or ["btc"])
         self.ml_directional_lean_horizons = (
@@ -1777,7 +1779,34 @@ class PolymarketBot:
                 if self.ml_directional_lean_mode:
                     if ML_DIRECTIONAL_LEAN_EVENTS_ONLY:
                         desired_buckets_key = ",".join(sorted(desired_buckets))
-                        if (
+                        direct_markets: List[Dict] = []
+                        for bucket in desired_buckets:
+                            asset, horizon = bucket.split(":", 1)
+                            cycle_seconds = {"5m": 300, "15m": 900, "1h": 3600, "4h": 14400}.get(horizon)
+                            if not cycle_seconds:
+                                continue
+                            cycle_start = int(now_ts // cycle_seconds) * cycle_seconds
+                            event = self.client.get_event_by_slug(f"{asset}-updown-{horizon}-{cycle_start}")
+                            if not event:
+                                continue
+                            scanned_events += 1
+                            for sub_market in event.get("markets", []) or []:
+                                if sub_market.get("closed") or not sub_market.get("acceptingOrders"):
+                                    continue
+                                sm = _enriched_event_market(event, sub_market)
+                                if _shortterm_bucket_key(_market_text_payload(sm)) == bucket:
+                                    direct_markets.append(sm)
+
+                        if direct_markets:
+                            markets.extend(direct_markets)
+                            event_market_count = len(direct_markets)
+                            self._lean_event_cache_key = desired_buckets_key
+                            self._lean_event_cache_markets = [dict(item) for item in direct_markets]
+                            self._lean_event_cache_scanned_events = scanned_events
+                            self._lean_event_cache_event_market_count = event_market_count
+                            self._lean_event_cache_expires_at = now_ts + _lean_event_cache_ttl_seconds(now_ts)
+                            use_cached_lean_events = True
+                        elif (
                             desired_buckets_key == self._lean_event_cache_key
                             and now_ts < self._lean_event_cache_expires_at
                         ):
