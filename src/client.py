@@ -1196,6 +1196,25 @@ class PolymarketClient:
             cprint(f"❌ Failed to fetch trades: {error_msg}", "red")
             return []
 
+    def get_public_market_trades(self, condition_ids: List[str], limit: int = 100) -> List[Dict]:
+        """Fetch public prints for paper maker-fill simulation."""
+        if not condition_ids:
+            return []
+        try:
+            import requests
+
+            response = requests.get(
+                "https://data-api.polymarket.com/trades",
+                params={"market": ",".join(condition_ids), "limit": limit, "takerOnly": "true"},
+                timeout=15,
+            )
+            response.raise_for_status()
+            result = response.json()
+            return result if isinstance(result, list) else []
+        except Exception as exc:
+            cprint(f"Failed to fetch public market trades: {exc}", "yellow")
+            return []
+
     def get_positions(self, limit: int = 100) -> Optional[List[Dict]]:
         """Get current positions from Data API (ground truth for exposure).
 

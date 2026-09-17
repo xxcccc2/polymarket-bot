@@ -10,6 +10,7 @@ Ties all components together:
 """
 
 import sys
+import json
 import re
 import time
 import signal
@@ -38,6 +39,8 @@ from .config import (
     ENABLE_CRYPTO_EVENT_INFRA,
     TERMINAL_CONVERGENCE_1H_ONLY,
     PAPER_TRADING,
+    PAPER_IMMEDIATE_FILL,
+    PAPER_BALANCE_USD,
     CRYPTO_MARKET_KEYWORDS,
     ONLY_CRYPTO_MARKETS,
     BTC_5MIN_KEYWORDS,
@@ -684,6 +687,7 @@ class PolymarketBot:
         last_market_refresh = 0
         last_sync = 0
         last_heartbeat = 0
+        last_paper_settlement = 0
         fill_check_interval = 30 if (ENABLE_USER_WEBSOCKET_FEED and not PAPER_TRADING) else 10
         sync_interval = POSITIONS_SYNC_SECONDS  # Sync order state + positions (catches missed fills, fixes drifted exposure)
         self._recent_trades_cache: List[Dict] = []  # shared with VPIN
@@ -692,6 +696,10 @@ class PolymarketBot:
         while self.is_running:
             try:
                 now = time.time()
+
+                if PAPER_TRADING and now - last_paper_settlement >= 60:
+                    self._settle_paper_positions()
+                    last_paper_settlement = now
 
                 if now - last_heartbeat >= 60:
                     binance_state = "connected" if self.binance_feed and self.binance_feed.connected else "disconnected"
@@ -731,15 +739,16 @@ class PolymarketBot:
                     last_balance_check = time.time()
 
                 # Refresh market universe periodically
-                if time.time() - last_market_refresh >= MARKET_REFRESH_SECONDS:
+                refresh_due = (
+                    time.time() >= self._next_lean_market_refresh_at
+                    if self.ml_directional_lean_mode
+                    else time.time() - last_market_refresh >= MARKET_REFRESH_SECONDS
+                )
+                if refresh_due:
                     t0 = time.time()
-                    should_refresh = True
-                    if self.ml_directional_lean_mode and self._next_lean_market_refresh_at > time.time():
-                        should_refresh = False
-                    if should_refresh:
-                        self._fetch_markets(is_refresh=True)
+                    self._fetch_markets(is_refresh=True)
                     dt = time.time() - t0
-                    if should_refresh and dt > 5:
+                    if dt > 5:
                         cprint(f"market_refresh took {dt:.1f}s (slow!)", "yellow")
                     last_market_refresh = time.time()
 
@@ -2482,6 +2491,8 @@ class PolymarketBot:
         try:
             diagnostics = self.client.get_balance_diagnostics()
             balance = diagnostics.get("balance")
+            if PAPER_TRADING and self.store:
+                balance = self.store.paper_account(PAPER_BALANCE_USD)["equity"]
             if balance is None:
                 if force_log:
                     cprint(
@@ -2522,7 +2533,15 @@ class PolymarketBot:
     def _check_for_fills(self):
         """Poll Polymarket for recent trades and detect fills."""
         try:
-            trades = self.client.get_trades(limit=50)
+            if PAPER_TRADING and not PAPER_IMMEDIATE_FILL:
+                condition_ids = sorted({
+                    str((order.metadata or {}).get("condition_id"))
+                    for order in self.order_manager.get_active_orders()
+                    if (order.metadata or {}).get("condition_id")
+                })
+                trades = self.client.get_public_market_trades(condition_ids, limit=500)
+            else:
+                trades = self.client.get_trades(limit=50)
             if not trades:
                 return
 
@@ -2547,7 +2566,9 @@ class PolymarketBot:
                     or trade.get("maker_order_id") or trade.get("makerOrderId")
                     or trade.get("taker_order_id") or trade.get("takerOrderId")
                 )
-                order = self._find_order_for_trade(token_id, side, price, size, trade_order_id)
+                order = self._find_order_for_trade(
+                    token_id, side, price, size, trade_order_id, trade.get("timestamp")
+                )
                 if order and order.is_active:
                     self._handle_fill_event(
                         order,
@@ -2562,6 +2583,55 @@ class PolymarketBot:
                     )
         except Exception as e:
             cprint(f"   ⚠️  Fill check error: {e}", "yellow")
+
+    def _settle_paper_positions(self) -> None:
+        """Close resolved paper positions at their published outcome payout."""
+        for position in list(self.risk_manager.positions.values()):
+            match = re.search(r"btc-updown-(?:5m|15m|1h|4h)-(\d+)$", position.market_slug or "")
+            if not match or time.time() < int(match.group(1)) + 930:
+                continue
+            event = self.client.get_event_by_slug(position.market_slug)
+            if not event:
+                continue
+            for market in event.get("markets", []) or []:
+                try:
+                    token_ids = market.get("clobTokenIds", [])
+                    prices = market.get("outcomePrices", [])
+                    if isinstance(token_ids, str):
+                        token_ids = json.loads(token_ids)
+                    if isinstance(prices, str):
+                        prices = json.loads(prices)
+                    index = [str(item) for item in token_ids].index(str(position.token_id))
+                    payout = float(prices[index])
+                except (ValueError, TypeError, IndexError, json.JSONDecodeError):
+                    continue
+                if not market.get("closed") or payout not in {0.0, 1.0}:
+                    continue
+                size = float(position.size)
+                self.store.save_trade({
+                    "trade_id": f"settlement_{position.token_id}",
+                    "order_id": "resolution",
+                    "token_id": position.token_id,
+                    "market_slug": position.market_slug,
+                    "side": "SELL",
+                    "price": payout,
+                    "size": size,
+                    "strategy": "resolution",
+                    "traded_at": datetime.now().isoformat(),
+                })
+                self.risk_manager.update_position(
+                    position.token_id,
+                    position.market_slug,
+                    position.side,
+                    size,
+                    payout,
+                    is_entry=False,
+                )
+                cprint(
+                    f"[PAPER] Settled {position.market_slug} {position.side} at ${payout:.2f}",
+                    "green" if payout else "yellow",
+                )
+                break
     
     def _on_order_fill(self, order, fill_data: Dict):
         """Handle order fills."""
@@ -2652,6 +2722,7 @@ class PolymarketBot:
         # Notify the correct strategy (not just the first one)
         strategy_name = order.metadata.get("strategy", "") if order.metadata else ""
         notified = False
+        exit_action = None
         for strat in self.strategies:
             if strat.name == strategy_name:
                 exit_action = strat.on_order_filled(order.order_id, fill_data)
@@ -2661,8 +2732,20 @@ class PolymarketBot:
         # Fallback: notify first strategy if no match
         if not notified and self.strategy:
             exit_action = self.strategy.on_order_filled(order.order_id, fill_data)
-        else:
-            exit_action = None
+
+        if (
+            not exit_action
+            and fill_side == "BUY"
+            and (order.metadata or {}).get("spread_entry")
+        ):
+            exit_action = {
+                "action": "place_exit",
+                "token_id": order.token_id,
+                "side": "SELL",
+                "price": (order.metadata or {}).get("spread_exit_price"),
+                "size": fill_size,
+                "reason": "Spread exit order",
+            }
         
         # Handle exit order if strategy requests one
         if exit_action and exit_action.get("action") == "place_exit":
@@ -2677,7 +2760,8 @@ class PolymarketBot:
                     "strategy": strategy_name,
                     "entry_price": order.price,
                     "outcome_side": (order.metadata or {}).get("outcome_side"),
-                }
+                },
+                post_only=strategy_name == "spread",
             )
 
     def _trade_already_processed(self, trade_id: Optional[str]) -> bool:
@@ -2710,6 +2794,7 @@ class PolymarketBot:
         price: float,
         size: float,
         trade_order_id: Optional[str] = None,
+        trade_timestamp: Optional[float] = None,
     ):
         if not self.order_manager:
             return None
@@ -2725,6 +2810,25 @@ class PolymarketBot:
 
         if not token_id or not side or price <= 0 or size <= 0:
             return None
+
+        if PAPER_TRADING and not PAPER_IMMEDIATE_FILL:
+            try:
+                trade_ts = float(trade_timestamp or 0)
+                if trade_ts > 10_000_000_000:
+                    trade_ts /= 1000
+            except (TypeError, ValueError):
+                trade_ts = 0
+            candidates = [
+                order for order in self.order_manager.orders.values()
+                if order.is_active
+                and self._norm_id(order.token_id or "") == self._norm_id(str(token_id or ""))
+                and (not trade_ts or order.created_at.timestamp() <= trade_ts)
+                and (
+                    (order.side == "BUY" and side == "SELL" and price <= order.price)
+                    or (order.side == "SELL" and side == "BUY" and price >= order.price)
+                )
+            ]
+            return min(candidates, key=lambda order: order.created_at) if candidates else None
 
         candidates = [
             order for order in self.order_manager.orders.values()

@@ -515,6 +515,7 @@ POSITIONS_SYNC_SECONDS = int(os.getenv("POSITIONS_SYNC_SECONDS", "120"))
 
 # Paper trading mode (no real orders)
 PAPER_TRADING = os.getenv("PAPER_TRADING", "true").lower() == "true"
+PAPER_IMMEDIATE_FILL = os.getenv("PAPER_IMMEDIATE_FILL", "true").lower() == "true"
 
 # Paper trading balance (used when PAPER_TRADING=true)
 PAPER_BALANCE_USD = float(os.getenv("PAPER_BALANCE_USD", "1000"))

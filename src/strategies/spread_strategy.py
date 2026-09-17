@@ -378,6 +378,7 @@ class SpreadStrategy(BaseStrategy):
                     "native_engine": native_used,
                     "sigma_b": self._sigma_cache.get(data.token_id, 0),
                     "q_t": self._get_inventory(data.token_id),
+                    "condition_id": data.condition_id,
                 },
             )
 
@@ -432,6 +433,12 @@ class SpreadStrategy(BaseStrategy):
         for signal in signals:
             if signal.signal_type != SignalType.BUY:
                 continue
+
+            if any(
+                order.is_active and order.side == "BUY"
+                for order in order_manager.get_orders_for_token(signal.token_id)
+            ):
+                continue
             
             try:
                 # Place buy order
@@ -440,22 +447,33 @@ class SpreadStrategy(BaseStrategy):
                     side="BUY",
                     price=signal.price,
                     size=signal.size,
-                    order_type="GTC"  # Good till cancelled
+                    order_type="GTC",  # Good till cancelled
+                    post_only=True,
+                    market_slug=signal.market_slug,
+                    metadata={
+                        "strategy": self.name,
+                        "outcome_side": signal.side,
+                        "spread_entry": True,
+                        "spread_exit_price": signal.metadata.get("exit_price"),
+                        "condition_id": signal.metadata.get("condition_id"),
+                    },
                 )
                 
                 if order_result.get("success"):
                     order_id = order_result.get("order_id")
                     
                     # Track pending order with exit target
-                    self.pending_orders[order_id] = {
-                        "token_id": signal.token_id,
-                        "market_slug": signal.market_slug,
-                        "side": signal.side,
-                        "entry_price": signal.price,
-                        "exit_price": signal.metadata.get("exit_price"),
-                        "size": signal.size,
-                        "created_at": datetime.now()
-                    }
+                    placed_order = order_result.get("order")
+                    if not placed_order or placed_order.is_active:
+                        self.pending_orders[order_id] = {
+                            "token_id": signal.token_id,
+                            "market_slug": signal.market_slug,
+                            "side": signal.side,
+                            "entry_price": signal.price,
+                            "exit_price": signal.metadata.get("exit_price"),
+                            "size": signal.size,
+                            "created_at": datetime.now()
+                        }
                     
                     # Update last trade time
                     self.last_trade_time[signal.token_id] = datetime.now()

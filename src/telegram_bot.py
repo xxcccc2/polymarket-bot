@@ -38,18 +38,28 @@ def active(name: str) -> bool:
     return systemctl("is-active", UNITS[name]) == "active"
 
 
-def stats(name: str) -> tuple[int, int, int, float]:
+def stats(name: str) -> tuple[int, int, int, float, float]:
     try:
         with sqlite3.connect(DATABASES[name]) as db:
-            orders = db.execute("SELECT COUNT(*) FROM orders").fetchone()[0]
+            orders = db.execute(
+                "SELECT COUNT(*) FROM orders WHERE status IN ('pending', 'open', 'partial')"
+            ).fetchone()[0]
             trades = db.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
             positions = db.execute("SELECT COUNT(*) FROM positions").fetchone()[0]
-            pnl = db.execute(
-                "SELECT COALESCE(SUM(realized_pnl), 0) + COALESCE(SUM(unrealized_pnl), 0) FROM positions"
+            buys, sells = db.execute(
+                """
+                SELECT COALESCE(SUM(CASE WHEN side='BUY' THEN price*size END), 0),
+                       COALESCE(SUM(CASE WHEN side='SELL' THEN price*size END), 0)
+                FROM trades
+                """
+            ).fetchone()
+            market_value = db.execute(
+                "SELECT COALESCE(SUM(current_price*size), 0) FROM positions"
             ).fetchone()[0]
-        return orders, trades, positions, float(pnl or 0)
+        equity = 100.0 - float(buys) + float(sells) + float(market_value)
+        return orders, trades, positions, equity, equity - 100.0
     except (OSError, sqlite3.Error):
-        return 0, 0, 0, 0.0
+        return 0, 0, 0, 100.0, 0.0
 
 
 def scanned_markets(name: str) -> int:
@@ -68,14 +78,14 @@ def read_log(name: str, limit: int = 3_000) -> str:
 
 
 def experiment_text(name: str, title: str) -> str:
-    orders, trades, positions, pnl = stats(name)
+    orders, trades, positions, bank, pnl = stats(name)
     markets = scanned_markets(name)
     state = "⚪ выключен"
     if active(name):
         state = "🟢 paper-фарм" if orders or trades or positions else ("🟡 сканирует" if markets else "🟡 ждёт рынок")
     return (
         f"{title}: {state}\n"
-        f"Банк: $100.00 · PnL: ${pnl:+.2f}\n"
+        f"Банк: ${bank:.2f} · PnL: ${pnl:+.2f}\n"
         f"Ордера: {orders} · Сделки: {trades} · Позиции: {positions}\n"
         f"Обзор рынков: {markets}"
     )

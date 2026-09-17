@@ -225,6 +225,33 @@ class SqliteStore:
                 payload,
             )
 
+    def paper_account(self, starting_balance: float) -> Dict[str, float]:
+        """Derive paper cash, equity and PnL from persisted fills and positions."""
+        with self._connect() as conn:
+            buys, sells = conn.execute(
+                """
+                SELECT
+                    COALESCE(SUM(CASE WHEN side = 'BUY' THEN price * size END), 0),
+                    COALESCE(SUM(CASE WHEN side = 'SELL' THEN price * size END), 0)
+                FROM trades
+                """
+            ).fetchone()
+            market_value, unrealized = conn.execute(
+                """
+                SELECT COALESCE(SUM(current_price * size), 0),
+                       COALESCE(SUM(unrealized_pnl), 0)
+                FROM positions
+                """
+            ).fetchone()
+        cash = float(starting_balance) - float(buys) + float(sells)
+        equity = cash + float(market_value)
+        return {
+            "cash": cash,
+            "equity": equity,
+            "pnl": equity - float(starting_balance),
+            "unrealized_pnl": float(unrealized),
+        }
+
     def save_wallet_copy_state(
         self,
         tracked_wallets: List[str],

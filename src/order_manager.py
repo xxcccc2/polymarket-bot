@@ -20,6 +20,7 @@ from .logging_utils import cprint
 from .config import (
     MAX_ACTIVE_ORDERS,
     ORDER_TIMEOUT_SECONDS,
+    PAPER_IMMEDIATE_FILL,
     PAPER_TRADING,
 )
 from .client import PolymarketClient
@@ -359,7 +360,7 @@ class OrderManager:
             self._persist_order(order)
             
             # Paper trading: simulate immediate fill
-            if PAPER_TRADING:
+            if PAPER_TRADING and PAPER_IMMEDIATE_FILL:
                 self.process_fill(order_id, {
                     "price": price,
                     "size": size,
@@ -475,7 +476,7 @@ class OrderManager:
                 result["order"] = order
                 self._persist_order(order)
 
-                if PAPER_TRADING:
+                if PAPER_TRADING and PAPER_IMMEDIATE_FILL:
                     self.process_fill(
                         order_id,
                         {
