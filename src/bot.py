@@ -703,7 +703,7 @@ class PolymarketBot:
 
                 if now - last_heartbeat >= 60:
                     binance_state = "connected" if self.binance_feed and self.binance_feed.connected else "disconnected"
-                    order_count = len(self.order_manager.orders) if self.order_manager else 0
+                    order_count = len(self.order_manager.get_active_orders()) if self.order_manager else 0
                     cprint(
                         f"heartbeat | markets={len(self.markets)} | binance={binance_state} | orders={order_count}",
                         "cyan",
