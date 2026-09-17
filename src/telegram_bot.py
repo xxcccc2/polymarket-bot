@@ -22,10 +22,10 @@ TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 UNITS = {"ml": "polymarket-ml.service", "spread": "polymarket-spread.service"}
 DATABASES = {
-    "ml": ROOT / "data" / "ml_15m_paper.sqlite",
+    "ml": ROOT / "data" / "ml_15m_observer.sqlite",
     "spread": ROOT / "data" / "spread_15m_paper.sqlite",
 }
-LOGS = {"ml": ROOT / "logs" / "ml-15m.log", "spread": ROOT / "logs" / "spread-15m.log"}
+LOGS = {"ml": ROOT / "logs" / "ml-observer.log", "spread": ROOT / "logs" / "spread-15m.log"}
 
 
 def systemctl(action: str, unit: str) -> str:
@@ -68,6 +68,17 @@ def scanned_markets(name: str) -> int:
     return int(matches[-1]) if matches else 0
 
 
+def observer_stats() -> tuple[int, int, float | None]:
+    try:
+        with sqlite3.connect(DATABASES["ml"]) as db:
+            total, resolved, brier = db.execute(
+                "SELECT COUNT(*), SUM(resolved_at IS NOT NULL), AVG(brier_score) FROM ml_observations"
+            ).fetchone()
+        return int(total), int(resolved or 0), None if brier is None else float(brier)
+    except (OSError, sqlite3.Error):
+        return 0, 0, None
+
+
 def read_log(name: str, limit: int = 3_000) -> str:
     try:
         with LOGS[name].open("rb") as file:
@@ -78,6 +89,11 @@ def read_log(name: str, limit: int = 3_000) -> str:
 
 
 def experiment_text(name: str, title: str) -> str:
+    if name == "ml":
+        total, resolved, brier = observer_stats()
+        state = "🟢 собирает прогнозы" if active(name) else "⚪ выключен"
+        quality = "—" if brier is None else f"{brier:.3f}"
+        return f"🧠 ML observer: {state}\nПрогнозы: {total} · Исходы: {resolved}\nBrier: {quality} · Сделок: 0"
     orders, trades, positions, bank, pnl = stats(name)
     markets = scanned_markets(name)
     state = "⚪ выключен"
@@ -94,7 +110,7 @@ def experiment_text(name: str, title: str) -> str:
 def status_text(prefix: str = "") -> str:
     return (
         f"{prefix}📊 BTC 15m PAPER\n\n"
-        f"{experiment_text('ml', '🧠 ML maker')}\n\n"
+        f"{experiment_text('ml', '🧠 ML observer')}\n\n"
         f"{experiment_text('spread', '📈 A-S maker')}\n\n"
         "BTC 5m: 🔴 выключен\nLive: 🔒 выключен"
     )

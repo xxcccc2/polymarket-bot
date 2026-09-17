@@ -14,3 +14,13 @@ def test_stats_reads_isolated_paper_database(tmp_path):
     telegram_bot.DATABASES["ml"] = db_path
 
     assert telegram_bot.stats("ml") == (1, 2, 0, 102.0, 2.0)
+
+
+def test_observer_stats_reads_resolved_forecasts(tmp_path):
+    db_path = tmp_path / "observer.sqlite"
+    with sqlite3.connect(db_path) as db:
+        db.execute("CREATE TABLE ml_observations (resolved_at REAL, brier_score REAL)")
+        db.execute("INSERT INTO ml_observations VALUES (1, 0.09), (NULL, NULL)")
+    telegram_bot.DATABASES["ml"] = db_path
+
+    assert telegram_bot.observer_stats() == (2, 1, 0.09)

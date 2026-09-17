@@ -584,6 +584,7 @@ MIN_PROFIT_MARGIN = float(os.getenv("MIN_PROFIT_MARGIN", "0.005"))  # 0.5%
 # ML DIRECTIONAL STRATEGY
 # =============================================================================
 ML_DIRECTIONAL_ENABLED = os.getenv("ML_DIRECTIONAL_ENABLED", "true").lower() == "true"
+ML_DIRECTIONAL_OBSERVER = os.getenv("ML_DIRECTIONAL_OBSERVER", "false").lower() == "true"
 ML_DIRECTIONAL_ENABLED_HORIZONS = [
     value.strip().lower()
     for value in os.getenv("ML_DIRECTIONAL_ENABLED_HORIZONS", "15m,1h").split(",")

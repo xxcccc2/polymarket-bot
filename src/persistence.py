@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -91,6 +92,29 @@ class SqliteStore:
                     tracked_wallets_json TEXT NOT NULL,
                     removed_at_json TEXT NOT NULL,
                     updated_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS ml_observations (
+                    market_slug TEXT NOT NULL,
+                    token_id TEXT NOT NULL,
+                    condition_id TEXT,
+                    outcome TEXT,
+                    observed_at REAL NOT NULL,
+                    end_date_ts REAL,
+                    probability REAL NOT NULL,
+                    market_mid_price REAL,
+                    buy_price REAL,
+                    entry_edge REAL,
+                    required_edge REAL,
+                    model_version TEXT,
+                    resolved_payout REAL,
+                    resolved_at REAL,
+                    correct_prediction INTEGER,
+                    brier_score REAL,
+                    PRIMARY KEY (market_slug, token_id)
                 )
                 """
             )
@@ -251,6 +275,53 @@ class SqliteStore:
             "pnl": equity - float(starting_balance),
             "unrealized_pnl": float(unrealized),
         }
+
+    def save_ml_observation(self, record: Dict[str, Any]) -> bool:
+        """Store the first ML forecast for a market outcome; never overwrite it."""
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT OR IGNORE INTO ml_observations (
+                    market_slug, token_id, condition_id, outcome, observed_at, end_date_ts,
+                    probability, market_mid_price, buy_price, entry_edge, required_edge, model_version
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record["market_slug"], record["token_id"], record.get("condition_id"),
+                    record.get("outcome"), float(record.get("observed_at", time.time())),
+                    record.get("end_date_ts"), float(record["probability"]),
+                    record.get("market_mid_price"), record.get("buy_price"),
+                    record.get("entry_edge"), record.get("required_edge"), record.get("model_version"),
+                ),
+            )
+            return cursor.rowcount > 0
+
+    def unresolved_ml_observations(self) -> List[Dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM ml_observations WHERE resolved_at IS NULL"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def resolve_ml_observation(self, market_slug: str, token_id: str, payout: float) -> None:
+        payout = float(payout)
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT probability FROM ml_observations WHERE market_slug=? AND token_id=?",
+                (market_slug, token_id),
+            ).fetchone()
+            if not row:
+                return
+            probability = float(row["probability"])
+            conn.execute(
+                """
+                UPDATE ml_observations
+                SET resolved_payout=?, resolved_at=?, correct_prediction=?, brier_score=?
+                WHERE market_slug=? AND token_id=?
+                """,
+                (payout, time.time(), int((probability >= 0.5) == (payout >= 0.5)),
+                 (probability - payout) ** 2, market_slug, token_id),
+            )
 
     def save_wallet_copy_state(
         self,

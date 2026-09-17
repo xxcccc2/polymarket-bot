@@ -363,6 +363,45 @@ class MLDirectionalStrategy(BaseStrategy):
             self._last_decision_snapshot_by_horizon[horizon] = decision_candidates.get(horizon, {})
         return signals
 
+    def observe(self, market_data: List[MarketData]) -> List[Dict[str, Any]]:
+        """Return one non-trading forecast per current Up outcome."""
+        self._load_model_if_needed()
+        if not self.enabled or not self.binance_feed:
+            return []
+        state = self.binance_feed.get_state("btc")
+        if not state.connected or (state.last_update and time.time() - state.last_update > self.feed_stale_seconds):
+            return []
+
+        observations: List[Dict[str, Any]] = []
+        for data in market_data:
+            horizon = self._extract_horizon(f"{data.question} {data.market_slug}".lower()) or "15m"
+            if horizon not in self.enabled_horizons or data.outcome.lower() != "up":
+                continue
+            if not data.has_real_quotes or not data.accepting_orders or data.is_resolved:
+                continue
+            inference = self._infer_market(data, state)
+            if inference is None:
+                continue
+            buy_price = self._maker_limit_buy_price(data)
+            if buy_price is None:
+                continue
+            probability = float(inference["probability"])
+            observations.append({
+                "market_slug": data.market_slug,
+                "token_id": data.token_id,
+                "condition_id": data.condition_id,
+                "outcome": data.outcome,
+                "observed_at": time.time(),
+                "end_date_ts": data.end_date_ts,
+                "probability": probability,
+                "market_mid_price": float(data.mid_price),
+                "buy_price": buy_price,
+                "entry_edge": probability - buy_price,
+                "required_edge": max(self.min_edge, self._compute_threshold(buy_price)),
+                "model_version": str(inference["model_version"]),
+            })
+        return observations
+
     def _update_decision_candidate(
         self,
         candidates: Dict[str, Dict[str, Any]],

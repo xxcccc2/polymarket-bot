@@ -71,6 +71,7 @@ from .config import (
     ML_DIRECTIONAL_LEAN_HORIZONS,
     ML_DIRECTIONAL_LEAN_EVENTS_ONLY,
     ML_DIRECTIONAL_LEAN_BINANCE_SYMBOLS,
+    ML_DIRECTIONAL_OBSERVER,
 )
 from .client import PolymarketClient
 from .websocket_feed import WebSocketFeed, UserWebSocketFeed
@@ -787,7 +788,10 @@ class PolymarketBot:
         
         # Check if trading is allowed
         can_trade, reason = self.risk_manager.can_trade()
-        if not can_trade:
+        observer_active = ML_DIRECTIONAL_OBSERVER and any(
+            strategy.name == "ml_directional" for strategy in self.strategies
+        )
+        if not can_trade and not observer_active:
             now_ts = time.time()
             throttle_seconds = 300 if any(
                 token in reason.lower() for token in ("entry window", "entry cap")
@@ -842,6 +846,18 @@ class PolymarketBot:
         total_signals = 0
         for strategy in self.strategies:
             strat_name = strategy.name.upper()
+
+            if ML_DIRECTIONAL_OBSERVER and strategy.name == "ml_directional":
+                created = sum(
+                    self.store.save_ml_observation(record)
+                    for record in strategy.observe(market_data_list)
+                )
+                if created:
+                    cprint(f"[ML OBSERVER] Saved {created} forecast(s); no orders will be sent", "cyan")
+                continue
+
+            if not can_trade:
+                continue
             
             # Check strategy health before running
             if self.analytics_enabled and self.strategy_tracker:
@@ -2631,6 +2647,35 @@ class PolymarketBot:
                     f"[PAPER] Settled {position.market_slug} {position.side} at ${payout:.2f}",
                     "green" if payout else "yellow",
                 )
+                break
+
+        for observation in self.store.unresolved_ml_observations():
+            end_date_ts = observation.get("end_date_ts")
+            if end_date_ts and time.time() < float(end_date_ts) + 30:
+                continue
+            event = self.client.get_event_by_slug(str(observation["market_slug"]))
+            if not event:
+                continue
+            for market in event.get("markets", []) or []:
+                try:
+                    token_ids = market.get("clobTokenIds", [])
+                    prices = market.get("outcomePrices", [])
+                    if isinstance(token_ids, str):
+                        token_ids = json.loads(token_ids)
+                    if isinstance(prices, str):
+                        prices = json.loads(prices)
+                    index = [str(item) for item in token_ids].index(str(observation["token_id"]))
+                    payout = float(prices[index])
+                except (ValueError, TypeError, IndexError, json.JSONDecodeError):
+                    continue
+                if market.get("closed") and payout in {0.0, 1.0}:
+                    self.store.resolve_ml_observation(
+                        str(observation["market_slug"]), str(observation["token_id"]), payout
+                    )
+                    cprint(
+                        f"[ML OBSERVER] Resolved {observation['market_slug']} payout={payout:.0f}",
+                        "green" if payout else "yellow",
+                    )
                 break
     
     def _on_order_fill(self, order, fill_data: Dict):
